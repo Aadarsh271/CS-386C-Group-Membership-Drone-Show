@@ -1,5 +1,5 @@
 #pragma once
-#include "core/Types.h"
+#include "membership/Types.h"
 
 enum class PacketKind {
     Heartbeat,

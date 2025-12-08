@@ -4,8 +4,13 @@
 using Vec3 = glm::vec3;
 
 enum class DroneStatus {
-    ALIVE,
-    SUSPECT,
-    DEAD
+    UP,
+    DOWN
+};
+
+enum class MembershipStatus {
+    MEMBER,
+    NOT_MEMBER,
+    SUSPECT
 };
 #pragma once

@@ -1,80 +1,32 @@
-#include <iostream>
-#include <vector>
-#include <cmath>
 #include "core/Simulation.h"
-#include <visualization/PacketVis.h>
+#include "core/RNG.h"
+#include "visualization/PolyscopeRenderer.h"
 
-// Polyscope
-#include "polyscope/polyscope.h"
-#include "polyscope/point_cloud.h"
+std::mt19937_64 GLOBAL_RNG;
 
-// For specifying per-point quantities (color/values)
-#include "polyscope/quantity.h"
-
-
-static Simulation sim(0.02);
-static polyscope::PointCloud* cloud = nullptr;
-static std::vector<PacketVis> activePackets;
-
-
-glm::vec3 stateColor(DroneStatus st, bool reconfigInProgress) {
-    switch (st) {
-    case DroneStatus::ALIVE: return reconfigInProgress ? glm::vec3(0.0, 1.0, 1.0) : glm::vec3(0.0, 1.0, 0.2);
-    case DroneStatus::SUSPECT: return glm::vec3(1.0, 0.9, 0.0);
-    case DroneStatus::DEAD: return glm::vec3(1.0, 0.1, 0.1);
-    }
-}
-
-void updateVisualization() {
-    sim.step();
-
-    std::vector<glm::vec3> positions;
-    std::vector<glm::vec3> colors;
-
-    for (auto& d : sim.getDrones()) {
-        positions.push_back(d.getPosition());
-
-        DroneStatus st = d.getStatus();
-        if (st == DroneStatus::ALIVE) colors.push_back({ 0.0f, 1.0f, 0.2f });
-        else if (st == DroneStatus::SUSPECT) colors.push_back({ 1.0f, 0.8f, 0.0f });
-        else colors.push_back({ 1.0f, 0.0f, 0.0f });
-    }
-
-    cloud->updatePointPositions(positions);
-    cloud->addColorQuantity("statusColor", colors);
-
+void reseedRNG(uint64_t seed) {
+    GLOBAL_RNG.seed(seed);
 }
 
 int main() {
-    std::cout << "Drone Show Simulation with Network / Core... \n";
 
-    // Initialize drones
-    for (int i = 0; i < 20; i++) {
-        sim.addDrone(Drone(i, { float(i) * 0.1f, 0.0f, 0.0f }));
-    }
+    SimulationConfig config;
+    config.deltaSmall = 1;
+    config.alphaLatency = 0;
+    config.deltaLarge = config.baseLatency + 2 * config.distanceLatencyFactor * config.maximalDistance;
+    /*config.baseLossProb = 0.0;
+    config.betaLoss = 0.0;
 
+    config.enableBursts = false;
+    config.burstStartProb = 0.0;
+    config.burstDropProb = 0.0;
+    config.burstDuration = 0.0;
+    */
+    Simulation sim(config);
 
-    std::vector<glm::vec3> positions;
-    positions.reserve(20);
+    PolyscopeRenderer renderer(&sim);
+    renderer.initialize();
+    renderer.renderLoop();
 
-    for (auto& d : sim.getDrones())
-        positions.push_back(d.getPosition());
-
-    // Polyscope setup
-    polyscope::init();
-    cloud = polyscope::registerPointCloud("drones", positions);
-
-
-
-    polyscope::state::userCallback = []() {
-        static bool killed = false;
-        if (!killed && ImGui::Button("Kill Drone 0")) {
-            sim.killDrone(0);
-            killed = true;
-        }
-        updateVisualization();
-        };
-
-    polyscope::show();
     return 0;
 }
