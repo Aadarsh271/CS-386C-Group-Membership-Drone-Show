@@ -161,10 +161,57 @@ FormationPattern FormationPattern::fromPolyline(const std::string& name,
     return p;
 }
 
-FormationPattern FormationPattern::loadFromImageOutline(const std::string& pngFile,
-    int targetSamples) {
-    // Stub: fill this in later with stb_image + contour tracing.
-    // For now, just return a simple circle so callers still work.
-    (void)pngFile;
-    return makeCircle("placeholder_from_png", 3.0f, targetSamples);
+FormationPattern FormationPattern::makeSquare(const std::string& name,
+    float sideLength,
+    int samplesPerEdge) {
+    std::vector<Vec3> pts;
+    float half = sideLength / 2.0f;
+
+    // Four corners
+    Vec3 corners[4] = {
+        Vec3(-half, 0.0f, -half),  // bottom-left
+        Vec3( half, 0.0f, -half),  // bottom-right
+        Vec3( half, 0.0f,  half),  // top-right
+        Vec3(-half, 0.0f,  half)   // top-left
+    };
+
+    // Densify each edge
+    for (int e = 0; e < 4; ++e) {
+        Vec3 a = corners[e];
+        Vec3 b = corners[(e + 1) % 4];
+
+        for (int k = 0; k < samplesPerEdge; ++k) {
+            float t = static_cast<float>(k) / samplesPerEdge;
+            pts.push_back((1.0f - t) * a + t * b);
+        }
+    }
+
+    return FormationPattern(name, pts, true);
+}
+
+FormationPattern FormationPattern::makeTriangle(const std::string& name,
+    float radius,
+    int samplesPerEdge) {
+    std::vector<Vec3> pts;
+    const float TWO_PI = 6.283185307179586f;
+
+    // Three vertices of equilateral triangle
+    Vec3 corners[3];
+    for (int i = 0; i < 3; ++i) {
+        float angle = TWO_PI * (static_cast<float>(i) / 3.0f) - TWO_PI / 4.0f; // rotate to point up
+        corners[i] = Vec3(radius * std::cos(angle), 0.0f, radius * std::sin(angle));
+    }
+
+    // Densify each edge
+    for (int e = 0; e < 3; ++e) {
+        Vec3 a = corners[e];
+        Vec3 b = corners[(e + 1) % 3];
+
+        for (int k = 0; k < samplesPerEdge; ++k) {
+            float t = static_cast<float>(k) / samplesPerEdge;
+            pts.push_back((1.0f - t) * a + t * b);
+        }
+    }
+
+    return FormationPattern(name, pts, true);
 }

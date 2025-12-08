@@ -2,6 +2,8 @@
 
 #include <unordered_map>
 #include <vector>
+#include <algorithm>
+
 #include <string>
 #include <glm/glm.hpp>
 #include "membership/MemberInfo.h"
@@ -31,8 +33,9 @@ public:
     std::vector<Message> generateHeartbeatMessages(double sendTime,
         const glm::vec3& selfPos);
 
-    // Reconfiguration
-    std::vector<Message> buildReconfigBroadcast(double currentTime);
+    // Reconfiguration - 3 phase protocol
+    std::vector<Message> buildReconfigBroadcast(double currentTime, const glm::vec3& selfPos);
+    void sendAck(double time, const glm::vec3& selfPos);
     void installReconfig(const std::vector<uint8_t>& payload,
         double time,
         const glm::vec3& selfPos);
@@ -58,7 +61,7 @@ public:
 	int getSelfId() const { return selfId; }
 
     void processInit(const Message& m, double time, const glm::vec3& selfPos);
-    void processAck(const Message& m, double time);
+    void processAck(const Message& m, double time);  // time used for position tracking
     void processCommit(const Message& m, double time, const glm::vec3& selfPos);
 
     void maybeSendAck(double time);
@@ -66,9 +69,13 @@ public:
 
     void forceGroupId(int g) { groupId = g; }
 
-    std::unordered_set<int> pruneMembers(std::unordered_set<int> acks) {
-        // eventually: pass view info to drone and write function in drone which prunes based on distance, num needed for formation, etc.
-        return acks;
+    // Prune members based on formation requirements (future: use distance, formation needs)
+    std::vector<int> pruneMembers(const std::unordered_set<int>& acks,
+                                   const std::unordered_map<int, glm::vec3>& positions) {
+        // For now, return all members who ACKed
+        std::vector<int> result(acks.begin(), acks.end());
+        std::sort(result.begin(), result.end());  // Deterministic ordering
+        return result;
     }
 
     bool isInGroup() const {
@@ -99,16 +106,18 @@ private:
 
     // ============ Reconfig protocol state ============
     bool inReconfig = false;
-    uint32_t pendingReconfigId = -1;
+    uint32_t pendingReconfigId = 0;
     double initReceivedTime = 0.0;        // when INIT arrived
-    double commitDueTime = 0.0;           // INIT time + Δ₂
+    double commitDueTime = 0.0;           // INIT time + 2*Δ₂
 
-    std::vector<int> pendingMembers;      // expected members
-    std::unordered_set<int> acksReceived; // who has ACKed
+    // Members are discovered via ACKs, not proposed in INIT
+    std::unordered_set<int> acksReceived;              // who has ACKed
+    std::unordered_map<int, glm::vec3> ackPositions;   // positions from ACKs
 
     int initiatorId = -1;
     double lastCommitTime = -1.0;     // when the last COMMIT was finalized
-    double lastInitTime = -1.0;     // when we last sent an INIT
+    double lastInitTime = -1.0;       // when we last sent an INIT
 
-	bool commitSent = false;
+    bool commitSent = false;
+    bool ackSent = false;             // have we sent our ACK for current reconfig?
 };

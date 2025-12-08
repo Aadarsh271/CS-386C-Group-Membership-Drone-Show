@@ -5,3 +5,5 @@ setup.bat
 project_dump.txt
 include.7z
 proj.zip
+/build
+/.claude

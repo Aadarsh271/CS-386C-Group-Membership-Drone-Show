@@ -44,6 +44,14 @@ public:
         int vertices,        // usually 5
         int samplesPerEdge);
 
+    FormationPattern makeTriangle(const std::string& name,
+        float radius,
+        int samplesPerEdge);
+
+    FormationPattern makeSquare(const std::string& name,
+        float sideLength,
+        int samplesPerEdge);
+
     // From arbitrary polyline; does NOT recompute on construction
     // unless you call recomputeArcLength().
     static FormationPattern fromPolyline(const std::string& name,

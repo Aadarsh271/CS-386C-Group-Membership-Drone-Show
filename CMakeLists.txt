@@ -85,41 +85,49 @@ if(MSVC)
 endif()
 
 # ============================================================================ #
-#                            UNIT TEST EXECUTABLE                              #
+#                                 AUTO TESTS                                   #
 # ============================================================================ #
 
-# Collect only the core logic (NO Polyscope/OpenGL)
+# Collect core logic files (NO visualization / OpenGL)
 file(GLOB_RECURSE TEST_SOURCES
     "${CMAKE_SOURCE_DIR}/src/core/*.cpp"
     "${CMAKE_SOURCE_DIR}/src/network/*.cpp"
     "${CMAKE_SOURCE_DIR}/src/membership/*.cpp"
-    "${CMAKE_SOURCE_DIR}/src/control/*.cpp" 
+    "${CMAKE_SOURCE_DIR}/src/control/*.cpp"
     "${CMAKE_SOURCE_DIR}/src/util/*.cpp"
 )
 
-set(TEST_MAIN
-    ${CMAKE_SOURCE_DIR}/tests/MembershipReconfigHarness.cpp
-)
-add_executable(membership-tests
-    ${TEST_SOURCES}
-    ${TEST_MAIN}
-)
+# Collect every .cpp test file in tests/
+file(GLOB TEST_FILES "${CMAKE_SOURCE_DIR}/tests/*.cpp")
 
-add_executable(formation-tests
-    ${TEST_SOURCES}
-    ${CMAKE_SOURCE_DIR}/tests/FormationAssignmentHarness.cpp
-)
-
-target_include_directories(membership-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-target_include_directories(formation-tests PRIVATE ${CMAKE_SOURCE_DIR}/include)
-
-target_include_directories(formation-tests PRIVATE ${stb_SOURCE_DIR})
-
-# ---- vcpkg dependencies needed for tests ----
+# Ensure glm is available
 find_package(glm CONFIG REQUIRED)
-target_link_libraries(membership-tests PRIVATE glm::glm)
-target_link_libraries(formation-tests PRIVATE glm::glm)
 
-# Optional: organize in IDE
+foreach(test_src ${TEST_FILES})
+
+    # Extract the test name (filename without extension)
+    get_filename_component(test_name ${test_src} NAME_WE)
+
+    # Make an executable for this test
+    add_executable(${test_name}
+        ${TEST_SOURCES}
+        ${test_src}
+    )
+
+    # Include dirs
+    target_include_directories(${test_name} PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${stb_SOURCE_DIR}                # allow image-based tests
+    )
+
+    # Link dependencies
+    target_link_libraries(${test_name} PRIVATE glm::glm)
+
+    # Put all test binaries in the "Tests" folder in IDEs
+    set_target_properties(${test_name} PROPERTIES FOLDER "Tests")
+
+endforeach()
+
+# Organize tests and sources in IDE
+source_group(TREE ${CMAKE_SOURCE_DIR}/tests PREFIX "Tests" FILES ${TEST_FILES})
 source_group(TREE ${CMAKE_SOURCE_DIR}/src PREFIX "TestSources" FILES ${TEST_SOURCES})
-source_group(TREE ${CMAKE_SOURCE_DIR}/tests PREFIX "Tests" FILES ${TEST_MAIN})
