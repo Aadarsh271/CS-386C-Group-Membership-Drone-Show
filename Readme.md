@@ -12,7 +12,7 @@ The simulator models:
 
 * Deterministic closest-neighbor selection
 
-* A 3-phase atomic reconfiguration protocol
+* A 3-phase atomic broadcast protocol for reconfiguration
 
 * Dynamic network conditions (latency, loss, jitter, burst failures)
 
@@ -31,10 +31,6 @@ The full write-up, including protocol details, proofs, design discussion, and ev
 
 
 **[report.pdf](report.pdf)**
-
-
-
-This PDF *is* the documentation for the project.
 
 
 
