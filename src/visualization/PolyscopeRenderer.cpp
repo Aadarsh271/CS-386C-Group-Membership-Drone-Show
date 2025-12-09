@@ -100,6 +100,8 @@ PolyscopeRenderer::PolyscopeRenderer(Simulation* sim)
 
 void PolyscopeRenderer::initialize() {
     polyscope::init();
+    polyscope::options::buildGui = false;
+
     polyscope::options::groundPlaneMode = polyscope::GroundPlaneMode::None;
 
     // Default to drone show mode: black background for dramatic effect
