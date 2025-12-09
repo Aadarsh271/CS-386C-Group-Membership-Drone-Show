@@ -60,6 +60,10 @@ public:
 	int getRightNeighbor() const { return rightNeighbor; }
 	int getSelfId() const { return selfId; }
 
+    // Heartbeat miss tracking for visualization
+    double getLastMissedHeartbeatTime() const { return lastMissedHeartbeatTime; }
+    int getLastMissedNeighborId() const { return lastMissedNeighborId; }
+
     void processInit(const Message& m, double time, const glm::vec3& selfPos);
     void processAck(const Message& m, double time);  // time used for position tracking
     void processCommit(const Message& m, double time, const glm::vec3& selfPos);
@@ -120,4 +124,8 @@ private:
 
     bool commitSent = false;
     bool ackSent = false;             // have we sent our ACK for current reconfig?
+
+    // Heartbeat miss tracking for visualization
+    double lastMissedHeartbeatTime = -1.0;
+    int lastMissedNeighborId = -1;
 };

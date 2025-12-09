@@ -44,11 +44,11 @@ public:
         int vertices,        // usually 5
         int samplesPerEdge);
 
-    FormationPattern makeTriangle(const std::string& name,
+    static FormationPattern makeTriangle(const std::string& name,
         float radius,
         int samplesPerEdge);
 
-    FormationPattern makeSquare(const std::string& name,
+    static FormationPattern makeSquare(const std::string& name,
         float sideLength,
         int samplesPerEdge);
 

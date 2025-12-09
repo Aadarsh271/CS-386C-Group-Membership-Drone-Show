@@ -1,0 +1,602 @@
+\documentclass[11pt]{article}
+
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{enumitem}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\geometry{margin=1in}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  stringstyle=\color{red},
+  breaklines=true,
+  frame=single,
+  language=C++
+}
+
+\title{%
+  \textbf{A Modified Cristian-Style Group Membership Protocol\\
+  for Distributed Drone Swarm Coordination}\\[1em]
+  \large Implementation Report and Progress Summary
+}
+\author{Project Documentation}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We describe the design and implementation of a modified Cristian-style
+neighborhood-surveillance group membership protocol tailored for a distributed
+drone swarm simulation.
+The baseline Cristian protocol assumes a synchronous system, fixed neighbor
+relationships, no rejoining, and crash-stop failures.
+To adapt this algorithm to a dynamic drone environment with omission faults,
+timing jitter, crash--recovery behavior, multiple groups, and hierarchical
+coordination tasks, we introduce a series of principled modifications.
+This document outlines the original protocol, the full list of enhancements,
+their motivations, design choices, implementation status, and recent bug fixes.
+\end{abstract}
+
+\tableofcontents
+
+\newpage
+
+\section{Introduction}
+
+Cristian's 1991 group membership protocol assumes a synchronous distributed
+system in which each process monitors its successor using periodic ``present''
+messages.
+Failure is detected through timeout, and a reconfiguration occurs when a process
+is declared failed.
+Although robust and simple, the original protocol does not directly support
+realistic drone-swarm conditions such as dynamic connectivity, omission faults,
+recovery after crash, or multiple overlapping coordination groups.
+
+The goal of this project is to implement a variant of Cristian's protocol that
+remains \emph{readable, modular, and faithful} at the membership layer while
+supporting the complexities needed for distributed drone coordination.
+All modifications to the protocol are isolated to a small subsystem to ensure
+clarity of reasoning and facilitate experimentation.
+
+\section{Baseline Cristian Algorithm}
+
+Cristian's original algorithm provides:
+\begin{itemize}[noitemsep]
+    \item A single group view shared by all correct processes.
+    \item A fixed logical ring topology for failure detection.
+    \item Unidirectional heartbeats (each process monitors only its successor).
+    \item A synchronous timing assumption with a known message delay bound.
+    \item A crash-stop failure model (failed processes do not recover).
+    \item Reconfiguration via atomic broadcast of the new group view.
+\end{itemize}
+
+Let $\Delta$ denote the known upper bound on message delay.
+A single missed heartbeat from the successor implies failure, triggering a new
+membership view and a new group identifier.
+
+\section{Design Goals for Drone-Swarm Membership}
+
+A drone swarm differs substantially from Cristian's assumed environment:
+\begin{itemize}[noitemsep]
+    \item Connectivity between drones changes continuously.
+    \item Message omissions and timing jitter are common.
+    \item Nodes may crash temporarily and later recover.
+    \item Multiple coordination groups may coexist.
+    \item Atomic broadcasts may become expensive under network congestion.
+    \item A hierarchical membership structure may be desirable.
+\end{itemize}
+
+Our design aims to satisfy the following:
+\begin{enumerate}[label=\textbf{G\arabic*}:, leftmargin=1.2cm]
+    \item Preserve the conceptual clarity of Cristian's membership logic.
+    \item Support realistic failures without altering the core protocol semantics.
+    \item Cleanly separate physical drone state from logical membership state.
+    \item Enable the introduction of SUSPECT states for omission tolerance.
+    \item Allow nodes to rejoin after recovery with cooldown mechanisms.
+    \item Support multiple independent membership groups and subgroups.
+    \item Support optional group-to-group coordination (future work).
+    \item Maintain performance under load via reduced broadcast frequency.
+\end{enumerate}
+
+\section{Internal vs.\ External State}
+
+We explicitly separate internal drone state from membership-visible state.
+
+\subsection{Internal Drone State (Not Visible to the Protocol)}
+
+\begin{description}[style=nextline]
+    \item[RUNNING] Drone is operating normally.
+    \item[TEMPORARILY\_CRASHED] Drone is unresponsive but scheduled to recover.
+    \item[PERMANENTLY\_DEAD] Drone will never recover.
+\end{description}
+
+Each drone stores an internal time \texttt{recoveryTime} indicating when it will
+return from a temporary crash.
+This information is \emph{not visible} to the membership protocol.
+
+\subsection{Public Drone Status (Visible to Membership Layer)}
+
+\begin{description}[style=nextline]
+    \item[UP] Drone is responsive (based on observed messages).
+    \item[DOWN] Drone is unresponsive.
+\end{description}
+
+The membership layer treats all unresponsive drones identically, regardless of
+whether the underlying cause is temporary or permanent.
+
+\section{Membership Status and Failure Detection}
+
+Membership state is independent of physical drone state.
+
+\subsection{MembershipStatus}
+
+\begin{description}[style=nextline]
+    \item[MEMBER] Drone is in the installed group view.
+    \item[SUSPECT] Drone has missed one or more heartbeats but has not been
+        removed from the group.
+    \item[NOT\_MEMBER] Drone is excluded from the current group view.
+\end{description}
+
+\subsection{k-Timeout Failure Detector}
+
+Instead of declaring failure after a single timeout, we use a $k$-timeout failure
+detector:
+\begin{equation}
+\text{missed}(i) =
+\begin{cases}
+0 &\Rightarrow \text{MEMBER},\\
+1 &\Rightarrow \text{SUSPECT},\\
+k &\Rightarrow \text{NOT\_MEMBER (trigger reconfiguration)}.
+\end{cases}
+\end{equation}
+
+This modification allows tolerance to omission and delay faults, which are
+expected in drone communication.
+
+\section{Protocol Extensions}
+
+We summarize all algorithmic modifications relative to Cristian's design.
+
+\subsection{Bidirectional and Multi-Neighborhood Surveillance}
+
+Instead of a single successor, each drone monitors both predecessor and successor
+or, more generally, all neighbors within a communication radius.
+This supports dynamic topologies.
+
+\subsection{SUSPECT State}
+
+The addition of SUSPECT enables resilience to omissions and jitter without
+frequent group reconfigurations.
+
+\subsection{Crash--Recovery Semantics}
+
+Drones may recover from crashes.
+Upon recovery, the drone becomes NOT\_MEMBER and may issue a \texttt{JOIN\_REQUEST}
+after a cooldown period $r$ seconds.
+
+\subsection{Join Cooldown}
+
+To avoid rejoin storms caused by unstable drones, each drone enforces a
+cooldown interval before issuing membership join requests.
+
+\subsection{Group-Initiated Invites}
+
+Groups may send \texttt{INVITE} messages to drones that appear to be operational
+but unaligned with any membership view.
+A drone may respond with a \texttt{JOIN\_REQUEST}.
+
+\subsection{Multiple Membership Groups}
+
+A drone can participate in multiple independent groups, each with its own:
+\begin{itemize}[noitemsep]
+    \item membership view,
+    \item group epoch,
+    \item surveillance relationships.
+\end{itemize}
+
+This enables hierarchical or role-based coordination.
+
+\subsection{Atomic Broadcast Cost Modeling}
+
+Reconfigurations incur simulated latency cost that increases with network load.
+This discourages overly frequent reconfigurations and motivates the use of
+SUSPECT state and multi-level group structures.
+
+\section{State Machine Summary}
+
+\noindent
+\textbf{State Transitions:}
+\begin{align*}
+\text{MEMBER} &\xrightarrow{\text{missed}=1} \text{SUSPECT},\\
+\text{SUSPECT} &\xrightarrow{\text{hb received}} \text{MEMBER},\\
+\text{SUSPECT} &\xrightarrow{\text{missed}=k} \text{NOT\_MEMBER},\\
+\text{DOWN} &\xrightarrow{\text{recovery}} \text{NOT\_MEMBER},\\
+\text{NOT\_MEMBER} &\xrightarrow{\text{JOIN\_REQUEST}} \text{MEMBER}.
+\end{align*}
+
+\section{Code Organization}
+
+To maintain clarity, all membership logic resides in:
+\begin{itemize}[noitemsep]
+    \item \texttt{membership/MembershipState.h}
+    \item \texttt{membership/MembershipState.cpp}
+    \item \texttt{membership/MemberInfo.h}
+    \item \texttt{membership/Types.h}
+\end{itemize}
+
+Simulation-layer concerns such as crash modeling, recovery distributions, and
+physical drone movement reside in:
+\begin{itemize}[noitemsep]
+    \item \texttt{core/Drone.h}, \texttt{core/Drone.cpp}
+    \item \texttt{core/Simulation.h}, \texttt{core/Simulation.cpp}
+\end{itemize}
+
+Network behavior (delay, omission, overload) is implemented in:
+\begin{itemize}[noitemsep]
+    \item \texttt{network/NetworkSimulator.h}, \texttt{network/NetworkSimulator.cpp}
+    \item \texttt{network/Message.h}
+\end{itemize}
+
+Visualization (heartbeats, membership coloring, packet animations) resides in:
+\begin{itemize}[noitemsep]
+    \item \texttt{visualization/PolyscopeRenderer.h}, \texttt{visualization/PolyscopeRenderer.cpp}
+\end{itemize}
+
+This separation ensures that the membership protocol remains simple and readable.
+
+\section{Three-Phase Reconfiguration Protocol}
+
+The implemented reconfiguration protocol follows a three-phase pattern where
+\textbf{members are discovered through ACKs}, not proposed upfront in the INIT.
+This design allows nodes to join a group dynamically without requiring the
+initiator to have prior knowledge of all participants.
+
+\subsection{Protocol Overview}
+
+\begin{enumerate}
+    \item \textbf{INIT Phase:} An initiator broadcasts a reconfiguration request
+    \item \textbf{ACK Phase:} All participating nodes respond with ACKs containing their positions
+    \item \textbf{COMMIT Phase:} The initiator finalizes membership based on received ACKs
+\end{enumerate}
+
+\subsection{Phase 1: INIT (Initiation)}
+
+When a node detects a failure or needs to form a group:
+\begin{enumerate}
+    \item Generate a unique \texttt{reconfigId} based on timestamp (milliseconds)
+    \item Broadcast \texttt{RECONFIG\_INIT} containing \textbf{only}:
+    \begin{itemize}
+        \item \texttt{reconfigId} (4 bytes, 32-bit)
+        \item \texttt{initiatorId} (2 bytes, 16-bit)
+    \end{itemize}
+    \item Transition to \texttt{inReconfig} state
+    \item Immediately send own ACK (initiator participates too)
+\end{enumerate}
+
+\textbf{Key Design Choice:} The INIT does \emph{not} contain a proposed member list.
+Members are discovered through the ACK phase.
+
+\subsection{Phase 2: ACK (Member Discovery)}
+
+Upon receiving an INIT, each node:
+\begin{enumerate}
+    \item Apply tie-breaking for concurrent INITs:
+    \begin{itemize}
+        \item Higher \texttt{reconfigId} wins
+        \item If equal, \textbf{lower} \texttt{initiatorId} wins (first-come-first-served)
+    \end{itemize}
+    \item Enter \texttt{inReconfig} state tracking the accepted INIT
+    \item Broadcast \texttt{RECONFIG\_ACK} containing:
+    \begin{itemize}
+        \item \texttt{reconfigId} (4 bytes)
+        \item \texttt{senderId} (2 bytes)
+        \item \texttt{position} (12 bytes: 3 floats for x, y, z)
+    \end{itemize}
+\end{enumerate}
+
+\textbf{All nodes} (including non-initiators) collect ACKs to learn about
+other participants and their positions. This enables distributed neighbor
+determination.
+
+\subsection{Phase 3: COMMIT (Neighbor Resolution and Finalization)}
+
+After waiting $2\Delta_2$ (stabilizing window), the initiator:
+\begin{enumerate}
+    \item Collects all ACKs received for the pending \texttt{reconfigId}
+    \item Determines final membership: all nodes that sent ACKs
+    \item Optionally prunes members based on formation requirements
+    \item Broadcasts \texttt{RECONFIG\_COMMIT} containing:
+    \begin{itemize}
+        \item \texttt{reconfigId} (4 bytes)
+        \item \texttt{initiatorId} (2 bytes)
+        \item \texttt{numMembers} (2 bytes)
+        \item For each member: \texttt{id} (2 bytes) + \texttt{position} (12 bytes)
+    \end{itemize}
+\end{enumerate}
+
+Upon receiving COMMIT, all nodes:
+\begin{enumerate}
+    \item Install final membership with positions from the COMMIT payload
+    \item Set \texttt{groupId = reconfigId}
+    \item Update neighbor relationships using the received positions
+    \item Exit \texttt{inReconfig} state
+\end{enumerate}
+
+\subsection{Tie-Breaking Logic}
+
+Concurrent INITs are resolved as follows:
+\begin{lstlisting}
+if (inReconfig) {
+    // Higher reconfigId wins
+    if (recId < pendingReconfigId) return; // reject
+
+    // Same reconfigId: LOWER initiatorId wins
+    if (recId == pendingReconfigId && initId >= initiatorId) return;
+
+    // This INIT is better - switch to it
+}
+\end{lstlisting}
+
+The tie-breaking ensures that when multiple nodes initiate simultaneously
+(with similar timestamps), the node with the \emph{lowest} ID becomes the
+initiator, providing deterministic convergence.
+
+\subsection{Message Wire Formats}
+
+\textbf{INIT:}
+\begin{verbatim}
+[reconfigId: 4 bytes][initiatorId: 2 bytes]
+Total: 6 bytes
+\end{verbatim}
+
+\textbf{ACK:}
+\begin{verbatim}
+[reconfigId: 4 bytes][senderId: 2 bytes][pos.x: 4 bytes][pos.y: 4 bytes][pos.z: 4 bytes]
+Total: 18 bytes
+\end{verbatim}
+
+\textbf{COMMIT:}
+\begin{verbatim}
+[reconfigId: 4 bytes][initiatorId: 2 bytes][numMembers: 2 bytes]
+[member1_id: 2 bytes][member1_pos: 12 bytes]
+[member2_id: 2 bytes][member2_pos: 12 bytes]
+...
+Total: 8 + 14 * numMembers bytes
+\end{verbatim}
+
+\subsection{Timing Parameters}
+
+\begin{itemize}
+    \item $\Delta_1$ (\texttt{deltaSmall}): Maximum datagram delay = 0.12s
+    \item $\Delta_2$ (\texttt{deltaLarge}): Stabilizing window = 0.50s
+    \item Heartbeat interval: 0.2s
+    \item Timeout delta: 0.6s
+    \item Reconfiguration minimum interval: 1.0--2.0s
+\end{itemize}
+
+\subsection{Protocol Properties}
+
+\begin{enumerate}
+    \item \textbf{Discovery-Based Membership:} Members are not proposed; they are
+          discovered through ACK responses
+    \item \textbf{Position Propagation:} Positions are exchanged during ACK phase,
+          enabling neighbor determination before COMMIT
+    \item \textbf{Deterministic Tie-Breaking:} Lower initiator ID wins ties,
+          ensuring all nodes converge to the same initiator
+    \item \textbf{Self-Inclusion:} Initiator sends its own ACK, ensuring it is
+          included in the final membership
+\end{enumerate}
+
+\section{Implementation Status and Recent Bug Fixes}
+
+\subsection{Bugs Identified and Fixed}
+
+During debugging of the startup group formation, four critical issues were identified and resolved:
+
+\subsubsection{Bug 1: Incorrect Initial Member Status}
+
+\textbf{Location:} \texttt{MembershipState.cpp}, \texttt{setDroneList()} function
+
+\textbf{Problem:} All drones except self were initialized with status \texttt{DOWN}:
+\begin{lstlisting}
+// INCORRECT:
+info.status = (d.getId() == selfId) ? DroneStatus::UP : DroneStatus::DOWN;
+\end{lstlisting}
+
+This caused each node to believe only itself was alive, resulting in single-member groups.
+
+\textbf{Fix:} Initialize all drones as \texttt{UP} at startup since they all just started:
+\begin{lstlisting}
+// CORRECT:
+info.status = DroneStatus::UP;
+info.lastHeartbeatTime = 0.0;  // Prevents immediate timeout
+info.lastKnownPosition = d.getPosition();
+\end{lstlisting}
+
+Additionally, neighbors are now initialized at startup based on initial positions.
+
+\subsubsection{Bug 2: INIT Messages Discarded}
+
+\textbf{Location:} \texttt{MembershipState.cpp}, \texttt{tick()} function
+
+\textbf{Problem:} When a node was not in a group, it called \texttt{buildReconfigBroadcast()} but discarded the returned messages:
+\begin{lstlisting}
+// INCORRECT:
+auto msgs = buildReconfigBroadcast(logicalTime);
+// msgs were never added to pendingReconfigs!
+\end{lstlisting}
+
+\textbf{Fix:} Add the messages to the pending queue and check \texttt{!inReconfig} to avoid duplicate initiation:
+\begin{lstlisting}
+// CORRECT:
+if (!isInGroup() && !inReconfig) {
+    auto msgs = buildReconfigBroadcast(logicalTime);
+    pendingReconfigs.insert(pendingReconfigs.end(),
+                            msgs.begin(), msgs.end());
+    lastInitTime = logicalTime;
+}
+\end{lstlisting}
+
+\subsubsection{Bug 3: ACKs Missing Position Information}
+
+\textbf{Location:} \texttt{MembershipState.cpp}, \texttt{processInit()} function
+
+\textbf{Problem:} Per the protocol specification, ACKs should include position information to enable neighbor determination. The original code did not set the position field.
+
+\textbf{Fix:} Include position in ACK message:
+\begin{lstlisting}
+Message ack;
+ack.type = MessageType::RECONFIG_ACK;
+ack.senderId = selfId;
+ack.receiverId = -1;  // Broadcast
+ack.timestamp = time;
+ack.pos = selfPos;  // NEW: Include position for neighbor determination
+\end{lstlisting}
+
+The \texttt{processAck()} function was also updated to store position information from received ACKs.
+
+\subsubsection{Bug 4: Neighbor Selection Ignoring Membership View}
+
+\textbf{Location:} \texttt{MembershipState.cpp}, \texttt{updateClosestNeighbors()} function
+
+\textbf{Problem:} The function only checked physical drone status, not membership view status:
+\begin{lstlisting}
+// INCORRECT: Only checked physical status
+if (d.getStatus() != DroneStatus::UP)
+    continue;
+\end{lstlisting}
+
+This could select neighbors not in the membership view, causing protocol inconsistencies.
+
+\textbf{Fix:} Check both physical status AND membership view:
+\begin{lstlisting}
+// CORRECT: Check both conditions
+if (d.getStatus() != DroneStatus::UP)
+    continue;
+
+auto it = view.find(id);
+if (it == view.end() || it->second.status != DroneStatus::UP)
+    continue;
+\end{lstlisting}
+
+\subsection{Current Implementation Status}
+
+\begin{center}
+\begin{tabular}{|l|c|l|}
+\hline
+\textbf{Feature} & \textbf{Status} & \textbf{Notes} \\
+\hline
+Heartbeat generation & \checkmark & Bidirectional to closest neighbors \\
+Heartbeat reception & \checkmark & Updates view and position \\
+Failure detection & \checkmark & Timeout-based \\
+INIT broadcast & \checkmark & With tie-breaking \\
+ACK with position & \checkmark & Recently fixed \\
+COMMIT finalization & \checkmark & Installs final view \\
+Neighbor update & \checkmark & Respects membership view \\
+Group formation on startup & \checkmark & Recently fixed \\
+Rate limiting & \checkmark & \texttt{reconfigMinInterval} \\
+SUSPECT state & Partial & Defined but not fully utilized \\
+Crash--recovery & \checkmark & At simulation layer \\
+Multiple groups & Future & Architecture supports it \\
+\hline
+\end{tabular}
+\end{center}
+
+\section{Test Infrastructure}
+
+The project includes a test harness in \texttt{tests/MembershipReconfigHarness.cpp} with two primary test cases:
+
+\subsection{Test 1: Single Reconfig}
+
+\begin{enumerate}
+    \item Initialize 8 drones with deterministic network (no loss, no latency)
+    \item Allow 5 seconds for heartbeat propagation
+    \item Kill drone 0 to trigger reconfiguration
+    \item Verify all UP drones reach consensus on same groupId
+    \item Verify crashed drone is excluded from final membership
+\end{enumerate}
+
+\subsection{Test 2: Two Reconfigs with Monotone GroupId}
+
+\begin{enumerate}
+    \item Initialize 8 drones, allow warmup
+    \item First crash: drone 0, verify consensus reached
+    \item Wait 5 seconds for stabilization
+    \item Second crash: highest-id surviving drone
+    \item Verify new consensus with strictly larger groupId
+\end{enumerate}
+
+\subsection{Assertions Verified}
+
+\begin{itemize}
+    \item \textbf{Consistency:} All UP drones agree on same groupId
+    \item \textbf{Completeness:} All UP drones have identical member sets
+    \item \textbf{Safety:} No crashed drones in final membership
+    \item \textbf{Liveness:} Reconfiguration completes within bounded time
+    \item \textbf{Monotonicity:} GroupId strictly increases across reconfigs
+\end{itemize}
+
+\section{Protocol Properties and Invariants}
+
+\subsection{Safety Properties}
+
+\begin{enumerate}
+    \item \textbf{No Byzantine Members:} Dead nodes never appear in final membership
+    \item \textbf{Consensus:} All UP nodes eventually agree on same groupId and membership
+    \item \textbf{Monotonic GroupId:} GroupId strictly increases across sequential reconfigs
+    \item \textbf{ACK Completeness:} All ACKs arriving before commitDueTime are included
+\end{enumerate}
+
+\subsection{Liveness Properties}
+
+\begin{enumerate}
+    \item \textbf{Eventual Consensus:} After failure detected, system reaches consensus in bounded time
+    \item \textbf{Bounded Reconfig:} COMMIT sent after $2\Delta_2$ stabilizing window
+    \item \textbf{Rate Limiting:} Minimum gap between consecutive reconfigs prevents thrashing
+\end{enumerate}
+
+\subsection{Timing Guarantees}
+
+Total reconfiguration time (worst case):
+\[
+T_{reconfig} \approx T_{detect} + \Delta_1 + 2\Delta_2 + \Delta_1 \approx 0.8 + 0.12 + 1.0 + 0.12 \approx 2.04\text{s}
+\]
+
+\section{Future Work}
+
+\begin{enumerate}
+    \item \textbf{Full SUSPECT State Implementation:} Currently defined but not fully utilized in failure detection
+    \item \textbf{k-Timeout Failure Detector:} Implement configurable missed heartbeat threshold
+    \item \textbf{Multiple Groups:} Enable hierarchical coordination with subgroups
+    \item \textbf{JOIN/INVITE Protocol:} Formal rejoin mechanism after recovery
+    \item \textbf{Performance Optimization:} Reduce broadcast overhead under load
+    \item \textbf{Visualization:} Enhanced membership state visualization in renderer
+\end{enumerate}
+
+\section{Conclusion}
+
+We have presented a systematic modernization of Cristian's membership protocol to
+support noisy, dynamic drone-swarm environments.
+By cleanly separating physical, membership, and network layers while preserving
+the conceptual simplicity of the original algorithm, the resulting system
+provides a robust foundation for fault tolerance, hierarchical coordination, and
+future scalability.
+
+Recent debugging efforts have resolved critical issues with startup group formation,
+ensuring that all nodes correctly discover each other and form a consistent group
+view. The three-phase INIT-ACK-COMMIT protocol now correctly handles concurrent
+initiation attempts through tie-breaking, and ACK messages properly carry position
+information for neighbor determination.
+
+The implementation is now ready for further testing and extension to support
+more advanced features such as the SUSPECT state, multiple coordination groups,
+and hierarchical membership structures.
+
+\end{document}

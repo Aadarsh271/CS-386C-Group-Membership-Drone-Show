@@ -15,7 +15,6 @@
 #include <random>
 #include <string>
 #include <vector>
-
 // ============================================================================
 //  Local state for drone show modes & timeline (kept CPP-only)
 // ============================================================================
@@ -33,14 +32,14 @@ namespace {
         double duration;     // transition duration
     };
 
-    ShowMode              gShowMode = ShowMode::Manual;
+    ShowMode              gShowMode = ShowMode::Auto;  // Start in auto mode for impressive first launch
     std::vector<Cue>      gTimeline;
     int                   gNextCue = 0;
     bool                  gTimelineInitialized = false;
-    double                gDefaultTransitionSec = 3.0;
-    double                gAutoShowLengthSec = 20.0;  // total length of auto show
+    double                gDefaultTransitionSec = 1.5;   // Faster transitions
+    double                gAutoShowLengthSec = 12.0;     // Shorter cycle for more action
 
-    // Build a very simple auto timeline using whatever patterns exist.
+    // Build an exciting auto timeline with varied transitions
     void buildAutoTimeline(Controller* ctrl, double startTime) {
         gTimeline.clear();
         gNextCue = 0;
@@ -50,30 +49,41 @@ namespace {
         int patternCount = ctrl->getPatternCount();
         if (patternCount <= 0) return;
 
-        // Simple scheme: start with pattern 0, then walk through all patterns,
-        // then back to 0, spreading them evenly over gAutoShowLengthSec.
+        // Dynamic show sequence: circle -> star -> square -> triangle -> star -> circle
+        // Mix of fast and slower transitions for visual interest
         std::vector<int> order;
-        for (int i = 0; i < patternCount; ++i) order.push_back(i);
-        if (patternCount > 1) {
-            // End by returning to the first pattern
-            order.push_back(0);
+        std::vector<double> durations;
+
+        if (patternCount >= 4) {
+            // Full show: circle(0) -> star(1) -> square(2) -> triangle(3) -> star(1) -> circle(0)
+            order = { 0, 1, 2, 3, 1, 0 };
+            durations = { 0.0, 1.2, 1.5, 1.0, 1.8, 1.2 };  // Varied timing
+        } else if (patternCount >= 2) {
+            order = { 0, 1, 0 };
+            durations = { 0.0, 1.5, 1.5 };
+        } else {
+            order = { 0 };
+            durations = { 0.0 };
         }
 
         int cueCount = (int)order.size();
         if (cueCount == 0) return;
 
+        double holdTime = 1.5;  // Time to hold each shape before transitioning
         double t = 0.0;
-        double stride = gAutoShowLengthSec / std::max(1, cueCount - 1);
 
         for (int i = 0; i < cueCount; ++i) {
             Cue c;
             c.time = t + startTime;
             c.patternIndex = order[i];
-            // First cue is instant, others use default duration
-            c.duration = (i == 0 ? 0.0 : gDefaultTransitionSec);
+            c.duration = durations[i];
             gTimeline.push_back(c);
-            t += stride;
+
+            // Time for this cue: transition duration + hold time
+            t += durations[i] + holdTime;
         }
+
+        gAutoShowLengthSec = t;  // Update total length
     }
 
 } // anonymous namespace
@@ -211,6 +221,32 @@ void PolyscopeRenderer::drawUI() {
     double hb = sim->getConfig().heartbeatInterval;
     int intervals = (hb > 0 ? int(t / hb) : 0);
     ImGui::Text("Heartbeat Intervals Elapsed: %d", intervals);
+
+    // Heartbeat miss indicator - find most recent miss across all drones
+    double latestMissTime = -1.0;
+    int latestMissDroneId = -1;
+    int latestMissNeighborId = -1;
+    for (auto& d : sim->getDrones()) {
+        if (d.getStatus() == DroneStatus::UP) {
+            double missTime = d.getMembership().getLastMissedHeartbeatTime();
+            if (missTime > latestMissTime) {
+                latestMissTime = missTime;
+                latestMissDroneId = d.getId();
+                latestMissNeighborId = d.getMembership().getLastMissedNeighborId();
+            }
+        }
+    }
+
+    ImGui::Separator();
+    if (latestMissTime > 0.0 && (t - latestMissTime) < 5.0) {
+        // Recent miss - show in red with fade
+        float fade = 1.0f - (float)(t - latestMissTime) / 5.0f;
+        ImGui::TextColored(ImVec4(1.0f, fade * 0.3f, fade * 0.3f, 1.0f),
+            "Last HB Miss: t=%.2f, Drone %d missed from %d",
+            latestMissTime, latestMissDroneId, latestMissNeighborId);
+    } else {
+        ImGui::TextDisabled("No recent heartbeat misses");
+    }
     ImGui::End();
 
     // ------------------------------------------------------------------------
@@ -327,6 +363,57 @@ void PolyscopeRenderer::drawUI() {
     // Drone Show panel: manual vs auto cueing, color effects tuning
     // ------------------------------------------------------------------------
     ImGui::Begin("Drone Show");
+
+    ImGui::SeparatorText("Visualization Modes");
+
+    // DRONE SHOW MODE
+    if (ImGui::Button("Drone Show Mode")) {
+
+        // Correct background color API
+        polyscope::view::bgColor = { 0.0f, 0.0f, 0.0f, 1.0f };
+        /*
+        // Correct camera API
+        polyscope::view::lookAt(
+            glm::vec3(0.0f, 0.0f, 10.0f),   // camera position
+            glm::vec3(0.0f, 0.0f, 0.0f),    // scene center
+            glm::vec3(0.0f, 1.0f, 0.0f)     // up direction
+        );
+        */
+        // Disable all group membership visual signals
+        showNeighborLinks = false;
+        showHeartbeats = false;
+        showBroadcasts = false;
+
+        // Use formation/drone-show colors
+        colorMode = PolyscopeRenderer::ColorMode::FORMATION;
+    }
+
+
+    // MEMBERSHIP MODE
+    if (ImGui::Button("Group Membership Mode")) {
+
+        // Reset background to default Polyscope gray
+        polyscope::view::bgColor = { 0.12f, 0.12f, 0.12f, 1.0f };
+        /*
+        // Restore your normal 3/4 view
+        polyscope::view::lookAt(
+            glm::vec3(5.0f, -8.0f, 4.0f),   // camera position
+            glm::vec3(0.0f, 0.0f, 0.0f),    // target
+            glm::vec3(0.0f, 0.0f, 1.0f)     // up direction
+        );
+        */
+        // Re-enable all membership visualization
+        showNeighborLinks = true;
+        showHeartbeats = true;
+        showBroadcasts = true;
+
+        // Use status-based coloring mode
+		colorMode = PolyscopeRenderer::ColorMode::STATUS;
+    }
+
+    ImGui::Separator();
+
+
 
     auto* ctrl = sim->getController();
     int patternCount = ctrl ? ctrl->getPatternCount() : 0;
@@ -532,12 +619,17 @@ void PolyscopeRenderer::updateNeighborLinks() {
     std::vector<std::array<size_t, 2>> edges;
     int N = (int)drones.size();
     for (int i = 0; i < N; ++i) {
+        // Only draw edges between UP drones in their membership views
+        if (drones[i].getStatus() != DroneStatus::UP) continue;
+
         int right = drones[i].getMembership().getRightNeighbor();
         int left = drones[i].getMembership().getLeftNeighbor();
-        if (right != -1) {
+
+        // Only draw if neighbor is also UP
+        if (right != -1 && right < N && drones[right].getStatus() == DroneStatus::UP) {
             edges.push_back({ (size_t)i, (size_t)right });
         }
-        if (left != -1) {
+        if (left != -1 && left < N && drones[left].getStatus() == DroneStatus::UP) {
             edges.push_back({ (size_t)i, (size_t)left });
         }
     }
@@ -550,6 +642,7 @@ void PolyscopeRenderer::updateNeighborLinks() {
     neighborNet = polyscope::registerCurveNetwork("neighbors", pts, edges);
     neighborNet->setRadius(0.005f);
     neighborNet->setColor(glm::vec3(0.3f, 0.3f, 1.0f));
+    neighborNet->setEnabled(true);  // Ensure it's enabled when we rebuild
 }
 
 // ============================================================================

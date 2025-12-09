@@ -11,9 +11,10 @@ void reseedRNG(uint64_t seed) {
 int main() {
 
     SimulationConfig config;
-    config.deltaSmall = 1;
+    config.deltaSmall = 0.5;
+    config.heartbeatInterval = 2;
     config.alphaLatency = 0;
-    config.deltaLarge = config.baseLatency + 2 * config.distanceLatencyFactor * config.maximalDistance;
+    //config.deltaLarge = config.baseLatency + 2 * config.distanceLatencyFactor * config.maximalDistance;
     /*config.baseLossProb = 0.0;
     config.betaLoss = 0.0;
 

@@ -1,5 +1,5 @@
-#define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+
 
 #include "control/FormationPattern.h"
 #include <vector>
@@ -13,7 +13,7 @@ static float dist2(const Vec3& a, const Vec3& b) {
     return d.x * d.x + d.y * d.y + d.z * d.z;
 }
 
-// Douglas�Peucker simplification
+// Douglas–Peucker simplification
 static void simplifyDP(const std::vector<Vec3>& pts,
     float eps,
     std::vector<Vec3>& out)
@@ -82,7 +82,7 @@ FormationPattern FormationPattern::loadFromImageOutline(const std::string& file,
         return FormationPattern::makeCircle("fallback", 5.0f, targetSamples);
     }
 
-    // Step 1 � Edge detection via simple gradient (Sobel or approximated)
+    // Step 1 — Edge detection via simple gradient (Sobel or approximated)
     std::vector<Vec3> edgePts;
 
     auto idx = [&](int x, int y) { return y * w + x; };
@@ -114,7 +114,7 @@ FormationPattern FormationPattern::loadFromImageOutline(const std::string& file,
         return FormationPattern::makeCircle("fallback", 5.0f, targetSamples);
     }
 
-    // Step 2 � Sort points by angle around centroid
+    // Step 2 — Sort points by angle around centroid
     Vec3 centroid(0);
     for (auto& p : edgePts) centroid += p;
     centroid /= float(edgePts.size());
@@ -126,13 +126,13 @@ FormationPattern FormationPattern::loadFromImageOutline(const std::string& file,
             return aa < bb;
         });
 
-    // Step 3 � Simplify outline
+    // Step 3 — Simplify outline
     std::vector<Vec3> simplified;
     simplifyDP(edgePts,               // input
         0.005f,                // epsilon
         simplified);           // output
 
-    // Step 4 � Arc-length resample
+    // Step 4 — Arc-length resample
     // Convert to FormationPattern and resample using its method
     FormationPattern tmp("image", simplified, true);
     std::vector<Vec3> finalPts;

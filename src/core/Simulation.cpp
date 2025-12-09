@@ -113,15 +113,24 @@ void Simulation::step() {
         controller->update(currentTime);
     }
 
-    // 4. physical motion
+    // 4. physical motion with smooth acceleration
     for (auto& d : drones) {
         if (controller && d.getStatus() == DroneStatus::UP) {
             Vec3 vel = controller->computeVelocityForDrone(
-                d.getId(), d.getPosition(), cfg.timeStep);
+                d.getId(), d.getPosition(), d.getVelocity(), cfg.timeStep);
             d.setVelocity(vel);
         }
         else {
-            d.setVelocity(Vec3(0.0f));
+            // Dead drones gradually slow down
+            Vec3 v = d.getVelocity();
+            float speed = glm::length(v);
+            if (speed > 0.01f) {
+                float decel = 3.0f * static_cast<float>(cfg.timeStep);
+                float newSpeed = std::max(0.0f, speed - decel);
+                d.setVelocity(v * (newSpeed / speed));
+            } else {
+                d.setVelocity(Vec3(0.0f));
+            }
         }
 
         d.integrate(cfg.timeStep);

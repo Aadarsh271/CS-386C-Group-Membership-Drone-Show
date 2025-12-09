@@ -41,6 +41,10 @@ public:
         return membership;
     }
 
+    const MembershipState& getMembership() const {
+        return membership;
+    }
+
     void setNeighbors(int leftId, int rightId) {
         membership.setNeighbors(leftId, rightId);
     }

@@ -17,13 +17,25 @@ Controller::Controller(Simulation& sim)
     FormationPattern circle = FormationPattern::makeCircle("circle", radius, 512);
     addPattern(circle);
 
-    // Star slightly larger than the circle.
+    // Star - iconic shape
     FormationPattern star = FormationPattern::makeStar("star",
         radius * 1.2f,
         radius * 0.5f,
         5,
         32);
     addPattern(star);
+
+    // Square
+    FormationPattern square = FormationPattern::makeSquare("square",
+        radius * 1.6f,
+        64);
+    addPattern(square);
+
+    // Triangle
+    FormationPattern triangle = FormationPattern::makeTriangle("triangle",
+        radius * 1.3f,
+        64);
+    addPattern(triangle);
 
     // Start on pattern 0 by default.
     setActivePattern(0);
@@ -77,6 +89,18 @@ void Controller::startTransitionTo(int nextIdx,
 // Rebuild targetsPrev/targetsNext and logical indices for *current* UP drones.
 void Controller::update(double simTime) {
     auto& drones = sim.getDrones();
+
+    // Update orbit animation offset
+    double dt = simTime - lastUpdateTime;
+    lastUpdateTime = simTime;
+
+    // Only orbit when not transitioning (holding a shape)
+    if (!inTransition && dt > 0.0 && dt < 1.0) {
+        orbitOffset += orbitSpeed * static_cast<float>(dt);
+        // Keep in [0, 1)
+        while (orbitOffset >= 1.0f) orbitOffset -= 1.0f;
+        while (orbitOffset < 0.0f) orbitOffset += 1.0f;
+    }
 
     // 1) Gather active (UP) drone ids.
     activeIds.clear();
@@ -135,12 +159,15 @@ void Controller::update(double simTime) {
     const FormationPattern& prevPat = patterns[prevPatternIndex];
     const FormationPattern& nextPat = patterns[nextPatternIndex];
 
-    rebuildAssignments(prevPat, targetsPrev);
+    // Apply orbit offset only when not transitioning
+    float offset = inTransition ? 0.0f : orbitOffset;
+
+    rebuildAssignments(prevPat, targetsPrev, offset);
     if (nextPatternIndex == prevPatternIndex) {
         targetsNext = targetsPrev; // identical
     }
     else {
-        rebuildAssignments(nextPat, targetsNext);
+        rebuildAssignments(nextPat, targetsNext, offset);
     }
 
     // defensiveness: ensure sizes match activeIds.size()
@@ -153,25 +180,40 @@ void Controller::update(double simTime) {
 }
 
 void Controller::rebuildAssignments(const FormationPattern& pattern,
-    std::vector<Vec3>& outTargets)
+    std::vector<Vec3>& outTargets,
+    float arcOffset)
 {
     outTargets.clear();
     if (activeIds.empty() || pattern.empty()) return;
 
-    // Use the same core logic as AssignmentStrategy to ensure
-    // the test harness matches the runtime behavior.
-    std::vector<DroneAssignment> assignments =
-        AssignmentStrategy::assignDronesToPattern(activeIds, pattern);
+    int N = static_cast<int>(activeIds.size());
+    outTargets.reserve(N);
 
-    outTargets.reserve(assignments.size());
-    for (const auto& a : assignments) {
-        outTargets.push_back(a.targetPos);
+    // Each drone gets a slot along the arc, with alternating CW/CCW direction
+    // based on their rank (even = CW, odd = CCW)
+    for (int i = 0; i < N; ++i) {
+        // Base position: evenly spaced along the formation
+        float baseU = static_cast<float>(i) / static_cast<float>(N);
+
+        // Direction alternation: even drones go CW (+), odd go CCW (-)
+        float direction = (i % 2 == 0) ? 1.0f : -1.0f;
+
+        // Apply orbit offset with direction
+        float u = baseU + arcOffset * direction;
+
+        // Wrap to [0, 1)
+        while (u >= 1.0f) u -= 1.0f;
+        while (u < 0.0f) u += 1.0f;
+
+        Vec3 pos = pattern.sampleNormalized(u);
+        outTargets.push_back(pos);
     }
 }
 
 Vec3 Controller::computeVelocityForDrone(int droneId,
     const Vec3& currentPos,
-    double dt) const
+    const Vec3& currentVel,
+    double dt)
 {
     if (dt <= 0.0 || activeIds.empty()) {
         return Vec3(0.0f);
@@ -197,22 +239,61 @@ Vec3 Controller::computeVelocityForDrone(int droneId,
 
     Vec3 delta = target - currentPos;
     float dist = glm::length(delta);
+
+    // Smooth motion parameters
+    const float maxSpeed = 2.5f;       // units per second
+    const float maxAccel = 4.0f;       // units per second squared
+    const float arrivalRadius = 0.05f; // slow down when this close
+
     if (dist < 1e-4f) {
-        return Vec3(0.0f);
+        // At target - decelerate to stop
+        float speed = glm::length(currentVel);
+        if (speed < 0.01f) {
+            return Vec3(0.0f);
+        }
+        // Decelerate
+        Vec3 decel = -glm::normalize(currentVel) * maxAccel * static_cast<float>(dt);
+        if (glm::length(decel) > speed) {
+            return Vec3(0.0f);
+        }
+        return currentVel + decel;
     }
 
-    // Simple speed-limited motion.
-    const float maxSpeed = 1.0f; // units per second
-    float maxStep = maxSpeed * static_cast<float>(dt);
+    Vec3 dir = delta / dist;
 
-    if (dist <= maxStep) {
-        // close enough: go directly there this frame.
-        return delta / static_cast<float>(dt);
+    // Desired velocity towards target
+    // Use arrival behavior: slow down as we approach
+    float desiredSpeed = maxSpeed;
+    if (dist < arrivalRadius * 10.0f) {
+        desiredSpeed = maxSpeed * (dist / (arrivalRadius * 10.0f));
+        desiredSpeed = std::max(desiredSpeed, 0.1f);
     }
-    else {
-        Vec3 dir = delta / dist;
-        return dir * maxSpeed;
+
+    Vec3 desiredVel = dir * desiredSpeed;
+
+    // Apply acceleration limit
+    Vec3 velDiff = desiredVel - currentVel;
+    float diffMag = glm::length(velDiff);
+
+    if (diffMag < 1e-4f) {
+        return desiredVel;
     }
+
+    float maxDeltaV = maxAccel * static_cast<float>(dt);
+    if (diffMag <= maxDeltaV) {
+        return desiredVel;
+    }
+
+    // Can't reach desired velocity this frame - accelerate towards it
+    Vec3 newVel = currentVel + (velDiff / diffMag) * maxDeltaV;
+
+    // Clamp to max speed
+    float newSpeed = glm::length(newVel);
+    if (newSpeed > maxSpeed) {
+        newVel = (newVel / newSpeed) * maxSpeed;
+    }
+
+    return newVel;
 }
 
 glm::vec3 Controller::hsvToRgb(float h, float s, float v) const {

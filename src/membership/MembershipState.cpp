@@ -101,40 +101,64 @@ void MembershipState::setDroneList(std::vector<Drone>* ptr) {
 // =============================
 void MembershipState::tick(double logicalTime, const glm::vec3& selfPos)
 {
-    // Send heartbeats periodically
+    double r = allDrones->at(selfId).config.reconfigMinInterval;
+
+    // ---- 1. Send heartbeats periodically ----
     if (logicalTime >= nextHeartbeatDue) {
         nextHeartbeatDue = logicalTime + heartbeatInterval;
         auto hb = generateHeartbeatMessages(logicalTime, selfPos);
         pendingHeartbeats.insert(pendingHeartbeats.end(), hb.begin(), hb.end());
     }
 
-    // If in reconfig, check if we should send COMMIT (initiator only)
+    // ---- 2. If in reconfig, handle COMMIT or timeout ----
     if (inReconfig) {
+        // Initiator sends COMMIT when ready
         maybeSendCommit(logicalTime);
-    }
 
-    // Check for failures that might trigger a reconfig
-    if (detectFailures(logicalTime)) {
-        double r = allDrones->at(selfId).config.reconfigMinInterval;
-        if (logicalTime >= lastCommitTime + r &&
-            logicalTime >= lastInitTime + r &&
-            !inReconfig)
-        {
-            auto rc = buildReconfigBroadcast(logicalTime, selfPos);
-            pendingReconfigs.insert(pendingReconfigs.end(), rc.begin(), rc.end());
-            lastInitTime = logicalTime;
+        // Timeout: if we've waited too long without receiving COMMIT,
+        // the initiator probably died. Abort so we can retry.
+        double reconfigTimeout = 4.0 * allDrones->at(selfId).config.deltaLarge;
+        if (logicalTime > initReceivedTime + reconfigTimeout && !commitSent) {
+            std::cout << "[TIMEOUT] Drone " << selfId << " reconfig timed out at t=" << logicalTime
+                      << " (started at " << initReceivedTime << ")\n";
+            inReconfig = false;
+            commitSent = false;
+            ackSent = false;
+            pendingReconfigId = 0;
+            initiatorId = -1;
+            acksReceived.clear();
+            ackPositions.clear();
+            // Don't reset lastInitTime - let rate limiting work naturally
         }
     }
 
-    // Not in a group and not already in a reconfig? Initiate one.
-    if (!isInGroup() && !inReconfig) {
-        double r = allDrones->at(selfId).config.reconfigMinInterval;
-        if (lastInitTime + r <= logicalTime) {
-            std::cout << "[DEBUG] Drone " << selfId << " initiating reconfig at t=" << logicalTime << "\n";
-            auto msgs = buildReconfigBroadcast(logicalTime, selfPos);
-            pendingReconfigs.insert(pendingReconfigs.end(), msgs.begin(), msgs.end());
-            lastInitTime = logicalTime;
-        }
+    // ---- 3. Failure detection ----
+    // Returns true if ANY neighbor is DOWN (newly detected or already known)
+    bool neighborDown = detectFailures(logicalTime);
+
+    // ---- 4. Determine if we should initiate a reconfig ----
+    // Rate limit: can only initiate every r seconds
+    bool rateLimitOk = (logicalTime >= lastCommitTime + r) &&
+                       (logicalTime >= lastInitTime + r);
+
+    // Case A: We have a failed neighbor and need to reconfigure
+    if (neighborDown && rateLimitOk && !inReconfig) {
+        // Update neighbors to exclude dead ones before initiating
+        updateClosestNeighbors(selfPos);
+
+        std::cout << "[TICK] Drone " << selfId << " INITIATING RECONFIG due to failed neighbor at t="
+                  << logicalTime << " (left=" << leftNeighbor << ", right=" << rightNeighbor << ")\n";
+        auto rc = buildReconfigBroadcast(logicalTime, selfPos);
+        pendingReconfigs.insert(pendingReconfigs.end(), rc.begin(), rc.end());
+        lastInitTime = logicalTime;
+    }
+    // Case B: We're not in a group (recovered from crash, or never joined)
+    // Per protocol: "If a drone is not a member of a group, every r seconds it initiates a new group"
+    else if (!isInGroup() && rateLimitOk && !inReconfig) {
+        std::cout << "[TICK] Drone " << selfId << " INITIATING RECONFIG (no group) at t=" << logicalTime << "\n";
+        auto msgs = buildReconfigBroadcast(logicalTime, selfPos);
+        pendingReconfigs.insert(pendingReconfigs.end(), msgs.begin(), msgs.end());
+        lastInitTime = logicalTime;
     }
 }
 
@@ -152,9 +176,11 @@ void MembershipState::receiveHeartbeat(int fromId, double time, const glm::vec3&
 // =============================
 //    FAILURE DETECTION
 // =============================
+// Returns true if any neighbor is currently DOWN (not just newly detected).
+// This allows retry logic to keep initiating reconfigs until the issue is resolved.
 bool MembershipState::detectFailures(double time)
 {
-    bool changed = false;
+    bool anyNeighborDown = false;
     int neigh[2] = { leftNeighbor, rightNeighbor };
 
     for (int n : neigh) {
@@ -166,15 +192,31 @@ bool MembershipState::detectFailures(double time)
         auto& info = it->second;
         if (info.lastHeartbeatTime < 0.0) continue;
 
-        if (info.status == DroneStatus::UP &&
-            (time - info.lastHeartbeatTime - heartbeatInterval) > timeoutDelta)
-        {
+        // Check if this neighbor has timed out
+        // Expected: heartbeat every heartbeatInterval seconds
+        // Timeout: if we haven't heard in heartbeatInterval + timeoutDelta
+        double timeSinceLastHB = time - info.lastHeartbeatTime;
+        double deadline = heartbeatInterval + timeoutDelta;
+
+        if (info.status == DroneStatus::UP && timeSinceLastHB > deadline) {
+            // Newly detected failure - mark as DOWN
+            std::cout << "[FAILURE] Drone " << selfId << " detected NEW failure of neighbor " << n
+                      << " at t=" << time << " (lastHB=" << info.lastHeartbeatTime
+                      << ", timeSince=" << timeSinceLastHB << ", deadline=" << deadline << ")\n";
             info.status = DroneStatus::DOWN;
-            changed = true;
+            anyNeighborDown = true;
+
+            // Track for visualization
+            lastMissedHeartbeatTime = time;
+            lastMissedNeighborId = n;
+        }
+        else if (info.status == DroneStatus::DOWN) {
+            // Already known DOWN neighbor - still need to trigger reconfig retry
+            anyNeighborDown = true;
         }
     }
 
-    return changed;
+    return anyNeighborDown;
 }
 
 // =============================
@@ -351,25 +393,20 @@ void MembershipState::setNeighbors(int leftId, int rightId) {
 // =============================
 //   CLOSEST NEIGHBORS
 // =============================
+// Per protocol: neighbors are determined ONLY from the membership view
+// (members who sent ACKs during reconfig). We use positions from the view,
+// NOT the physical drone positions from allDrones.
 void MembershipState::updateClosestNeighbors(const glm::vec3& selfPos)
 {
-    if (!allDrones) return;
-
     std::vector<std::pair<float, int>> dist;
 
-    for (const auto& d : *allDrones) {
-        int id = d.getId();
+    // Only consider members in our view who are marked UP
+    for (const auto& [id, info] : view) {
         if (id == selfId) continue;
+        if (info.status != DroneStatus::UP) continue;
 
-        // Only consider drones that are both physically UP and in our membership view
-        if (d.getStatus() != DroneStatus::UP)
-            continue;
-
-        auto it = view.find(id);
-        if (it == view.end() || it->second.status != DroneStatus::UP)
-            continue;
-
-        float d2 = glm::distance(selfPos, d.getPosition());
+        // Use position from the view (received via ACK), not physical position
+        float d2 = glm::distance(selfPos, info.lastKnownPosition);
         dist.emplace_back(d2, id);
     }
 
@@ -535,6 +572,9 @@ void MembershipState::maybeSendCommit(double time)
 
     pendingReconfigs.push_back(c);
     commitSent = true;
+
+    // The initiator also needs to process their own COMMIT to finalize their state
+    // This is done when we receive the broadcast back (through processCommit)
 }
 
 // =============================
@@ -557,8 +597,12 @@ void MembershipState::processCommit(const Message& m, double time, const glm::ve
     std::cout << "[COMMIT RECV] Drone " << selfId << " received COMMIT recId=" << recId
               << " from initiator=" << initId << " numMembers=" << numMembers << "\n";
 
+    // Protocol: Only accept COMMIT if we participated in this reconfig (sent ACK)
+    // Nodes that didn't participate must form their own group via INIT
     if (!inReconfig || recId != pendingReconfigId) {
-        std::cout << "[COMMIT RECV] Drone " << selfId << " rejecting: not in matching reconfig\n";
+        std::cout << "[COMMIT RECV] Drone " << selfId << " rejecting: not in matching reconfig"
+                  << " (inReconfig=" << inReconfig << ", pendingReconfigId=" << pendingReconfigId
+                  << ", recId=" << recId << ")\n";
         return;
     }
 

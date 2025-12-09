@@ -1,28 +1,28 @@
-\# Drone Show Distributed Membership \& Visualization Simulator
+# Drone Show Distributed Membership & Visualization Simulator
 
 
 
-This repository contains the implementation, tests, and visualization environment for a distributed \*\*neighborhood-surveillance–based group membership protocol\*\* and \*\*drone-show formation controller\*\*.
+This repository contains the implementation, tests, and visualization environment for a distributed **neighborhood-surveillance–based group membership protocol** and **drone-show formation controller**.
 
 The simulator models:
 
 
 
-\* Heartbeat-based failure detection
+* Heartbeat-based failure detection
 
-\* Deterministic closest-neighbor selection
+* Deterministic closest-neighbor selection
 
-\* A 3-phase atomic reconfiguration protocol
+* A 3-phase atomic reconfiguration protocol
 
-\* Dynamic network conditions (latency, loss, jitter, burst failures)
+* Dynamic network conditions (latency, loss, jitter, burst failures)
 
-\* Formation interpolation \& real-time drone-show morphing
+* Formation interpolation & real-time drone-show morphing
 
-\* Full Polyscope visualization (neighbors, packets, formations)
+* Full Polyscope visualization (neighbors, packets, formations)
 
 
 
-\## Full Report
+## Full Report
 
 
 
@@ -30,33 +30,33 @@ The full write-up, including protocol details, proofs, design discussion, and ev
 
 
 
-\*\*\[report.pdf](report.pdf)\*\*
+**[report.pdf](report.pdf)**
 
 
 
-This PDF \*is\* the documentation for the project.
+This PDF *is* the documentation for the project.
 
 
 
-\## Build Instructions
+## Build Instructions
 
 
 
-\### Requirements
+### Requirements
 
 
 
-\* CMake ≥ 3.16
+* CMake ≥ 3.16
 
-\* C++20 compiler
+* C++20 compiler
 
-\* Polyscope (fetched automatically using `FetchContent`)
+* Polyscope (fetched automatically using `FetchContent`)
 
-\* glm
+* glm
 
 
 
-\### Build
+### Build
 
 
 
@@ -74,7 +74,7 @@ cmake --build .
 
 
 
-\### Run
+### Run
 
 
 
@@ -86,7 +86,7 @@ cmake --build .
 
 
 
-\## Project Structure
+## Project Structure
 
 
 

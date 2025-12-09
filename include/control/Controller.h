@@ -35,11 +35,13 @@ public:
     void update(double simTime);
 
     // Compute velocity that nudges drone towards its current target.
+    // Uses acceleration-limited smooth motion (not instantaneous velocity changes).
     Vec3 computeVelocityForDrone(int droneId,
         const Vec3& currentPos,
-        double dt) const;
+        const Vec3& currentVel,
+        double dt);
 
-    // For visualization: bright “drone show” colors by logical index.
+    // For visualization: bright ï¿½drone showï¿½ colors by logical index.
     glm::vec3 getColorForDrone(int droneId,
         DroneStatus status) const;
 
@@ -63,8 +65,14 @@ private:
     std::vector<Vec3> targetsPrev;            // pattern(prevPatternIndex)
     std::vector<Vec3> targetsNext;            // pattern(next or active)
 
+    // Orbit animation: drones move CW/CCW along formation when holding
+    double lastUpdateTime = 0.0;
+    float orbitOffset = 0.0f;                 // accumulated offset in normalized arc-length [0,1)
+    float orbitSpeed = 0.03f;                 // orbit speed (normalized arc-length per second)
+
     void rebuildAssignments(const FormationPattern& pattern,
-        std::vector<Vec3>& outTargets);
+        std::vector<Vec3>& outTargets,
+        float arcOffset = 0.0f);              // offset for orbit animation
 
     glm::vec3 hsvToRgb(float h, float s, float v) const;
 };
