@@ -1,64 +1,85 @@
-﻿#pragma once
+#pragma once
 #include <core/RNG.h>
 #include <cstdint>
 
+// =============================================================================
+// SimulationConfig - All the knobs and dials for the simulator
+//
+// This structure contains every configurable parameter for the drone swarm
+// simulation. Parameters are organized into logical groups:
+//   - Global: timestep, random seed
+//   - Protocol: heartbeat timing, failure detection thresholds
+//   - Faults: crash injection for stress testing
+//   - Network: latency, loss, and all manner of network nastiness
+// =============================================================================
+
 struct SimulationConfig {
 
-    // --- Global simulation ---
-    uint64_t seed = 1;
-    double timeStep = 0.02;  // seconds per simulation update
+    // -------------------------------------------------------------------------
+    // Global Simulation Parameters
+    // -------------------------------------------------------------------------
+    uint64_t seed = 1;             // RNG seed for reproducibility
+    double timeStep = 0.02;        // Seconds per simulation update
 
-    // --- Drone counts / initial layout ---
-    int numDrones = 20;
-    float droneSpacing = 0.1f;
+    // -------------------------------------------------------------------------
+    // Swarm Configuration
+    // -------------------------------------------------------------------------
+    int numDrones = 20;            // Number of drones in the swarm
+    float droneSpacing = 0.1f;     // Spacing factor for initial layout
 
-    // --- Membership protocol parameters ---
-    double heartbeatInterval = 0.2; // seconds
-    double timeoutDelta = 0.6;      // delay bound Δ
-    // --- Membership timing constraints ---
-    double deltaSmall = 0.12;   // maximum datagram time delay (Δ1)
-    double deltaLarge = 0.50;   // atomic broadcast stabilizing window (Δ2)
+    // -------------------------------------------------------------------------
+    // Membership Protocol Timing
+    // These parameters directly affect failure detection speed vs reliability.
+    // -------------------------------------------------------------------------
+    double heartbeatInterval = 0.2;    // How often drones send heartbeats
+    double timeoutDelta = 0.6;         // Delay bound for timeout detection
+    double deltaSmall = 0.12;          // Max datagram delay (Δ₁)
+    double deltaLarge = 0.50;          // Atomic broadcast stabilization (Δ₂)
+    double reconfigMinInterval = 1.0;  // Min time between reconfigurations
 
-    int kMissTolerance = 2;         // suspect after 1, dead after k
-    double joinCooldown = 2.0;      // seconds before rejoin
+    int kMissTolerance = 2;            // Misses before declaring failure
+    double joinCooldown = 2.0;         // Cooldown before rejoin attempt
 
-    // --- Fault model parameters ---
-    bool enableCrashes = false;
-    double crashRate = 0.0;
-    double pPermanentCrash = 0.05;
+    // -------------------------------------------------------------------------
+    // Fault Injection Model
+    // For stress testing the protocol under adverse conditions.
+    // -------------------------------------------------------------------------
+    bool enableCrashes = false;        // Enable random drone crashes
+    double crashRate = 0.0;            // Probability of crash per tick
+    double pPermanentCrash = 0.05;     // Probability crash is permanent
 
-    double recoveryMin = 3.0;
-    double recoveryMax = 8.0;
+    double recoveryMin = 3.0;          // Min recovery time (seconds)
+    double recoveryMax = 8.0;          // Max recovery time (seconds)
 
-    double omissionProb = 0.0;     // per message omission
-    double sendJitter = 0.0;       // additive jitter on send timestamps
+    double omissionProb = 0.0;         // Per-message omission probability
+    double sendJitter = 0.0;           // Timestamp jitter (seconds)
 
-    // Clock drift
-    double driftMin = 1.0;         // scale factor (no drift)
+    // Clock drift (for future use)
+    double driftMin = 1.0;
     double driftMax = 1.0;
 
-    // --- Network parameters ---
-    double baseLatency = 0.05;
-    double alphaLatency = 0.1;     // latency growth with load
-    double baseLossProb = 0.0;
-    double betaLoss = 0.01;        // loss growth with load
+    // -------------------------------------------------------------------------
+    // Network Model
+    // Simulates realistic network behavior including latency and packet loss.
+    // -------------------------------------------------------------------------
+    double baseLatency = 0.05;         // Base network latency (seconds)
+    double alphaLatency = 0.1;         // Latency growth with network load
+    double distanceLatencyFactor = 0.0; // Extra latency based on distance
+    double maximalDistance = 10;       // Reference distance for calculations
 
-    // Distance-based latency
-    double distanceLatencyFactor = 0.0;
-	double maximalDistance = 10; // for distance-based latency calculations
+    double baseLossProb = 0.0;         // Base packet loss probability
+    double betaLoss = 0.01;            // Loss growth with load
 
-    // Burst loss
+    // Burst loss model (correlated losses)
     bool enableBursts = false;
     double burstStartProb = 0.0;
     double burstDropProb = 0.0;
     double burstDuration = 0.0;
 
-    // Duplication
-    double duplicationProb = 0.0;
+    double duplicationProb = 0.0;      // Packet duplication probability
 
-    // Visualization (optional defaults)
+    // -------------------------------------------------------------------------
+    // Visualization Defaults
+    // -------------------------------------------------------------------------
     bool showMembershipViz = false;
-
-    double reconfigMinInterval = 1.0;  // r seconds between consecutive atomic broadcasts
-
 };

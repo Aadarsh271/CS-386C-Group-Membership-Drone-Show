@@ -1,5 +1,13 @@
-﻿#include <iostream>
+// =============================================================================
+// Drone.cpp - Individual Drone Agent
+//
+// Each drone is an autonomous agent participating in the group membership
+// protocol. It maintains its own membership state, handles message passing,
+// and can experience various failure modes for testing.
+// =============================================================================
+
 #include "core/Drone.h"
+#include "util/Logger.h"
 
 Drone::Drone(int id, const Vec3& startPos, const SimulationConfig& cfg)
     : id(id),
@@ -13,11 +21,12 @@ int Drone::getId() const { return id; }
 const Vec3& Drone::getPosition() const { return position; }
 DroneStatus Drone::getStatus() const { return status; }
 
-//
-// ================================
-//   INTERNAL FAULT STEP FUNCTION
-// ================================
-//
+// -----------------------------------------------------------------------------
+// Fault Injection
+// Simulates random crashes and recovery for testing protocol resilience.
+// Because in the real world, things break. Often at the worst possible time.
+// -----------------------------------------------------------------------------
+
 void Drone::stepFaults(double simTime) {
     using FS = InternalFaultState;
 
@@ -68,11 +77,11 @@ void Drone::stepFaults(double simTime) {
     status = DroneStatus::UP;
 }
 
-//
-// ================================
-//       UPDATE (called each tick)
-// ================================
-//
+// -----------------------------------------------------------------------------
+// Main Update Loop
+// Called each simulation tick. Dead drones don't do anything (obviously).
+// -----------------------------------------------------------------------------
+
 void Drone::update(double simTime) {
     stepFaults(simTime);
 
@@ -83,41 +92,11 @@ void Drone::update(double simTime) {
     membership.tick(simTime, position);
 }
 
-//
-// ================================
-//        MESSAGE GENERATION
-// ================================
-//
-/*
-std::vector<Message> Drone::generateMessages(double simTime) {
+// -----------------------------------------------------------------------------
+// Message Generation
+// Collect all pending messages from the membership layer.
+// -----------------------------------------------------------------------------
 
-    std::vector<Message> msgs;
-    if (status == DroneStatus::DOWN) return msgs;
-
-    // Omission check (node-level)
-    std::uniform_real_distribution<double> uni(0.0, 1.0);
-    bool omit = (uni(GLOBAL_RNG) < config.omissionProb);
-
-    // Jitter on the timestamp
-    double sendTime = simTime;
-    if (config.sendJitter > 0.0) {
-        std::uniform_real_distribution<double> jitter(
-            -config.sendJitter, config.sendJitter);
-        sendTime += jitter(GLOBAL_RNG);
-    }
-
-    if (!omit) {
-        // Heartbeats
-        auto hb = membership.generateHeartbeatMessages(sendTime);
-        msgs.insert(msgs.end(), hb.begin(), hb.end());
-
-        // Reconfig messages
-        auto rc = membership.consumePendingReconfigs();
-        msgs.insert(msgs.end(), rc.begin(), rc.end());
-    }
-
-    return msgs;
-}*/
 std::vector<Message> Drone::generateMessages(double time) {
     if (status == DroneStatus::DOWN)
         return {};
@@ -133,34 +112,38 @@ std::vector<Message> Drone::generateMessages(double time) {
     out.insert(out.end(), rc.begin(), rc.end());
 
     for (const auto& msg : rc) {
-        std::cout << "[SEND] Drone " << id << " sending ";
-        if (msg.type == MessageType::RECONFIG_INIT) std::cout << "INIT";
-        else if (msg.type == MessageType::RECONFIG_ACK) std::cout << "ACK";
-        else if (msg.type == MessageType::RECONFIG_COMMIT) std::cout << "COMMIT";
-        std::cout << "\n";
+        if (Log::enabled && Log::showMessages) {
+            std::cout << "[SEND] Drone " << id << " sending ";
+            if (msg.type == MessageType::RECONFIG_INIT) std::cout << "INIT";
+            else if (msg.type == MessageType::RECONFIG_ACK) std::cout << "ACK";
+            else if (msg.type == MessageType::RECONFIG_COMMIT) std::cout << "COMMIT";
+            std::cout << "\n";
+        }
     }
 
     return out;
 }
 
 
-//
-// ================================
-//        MESSAGE RECEPTION
-// ================================
-//
+// -----------------------------------------------------------------------------
+// Message Reception
+// Route incoming messages to the appropriate handler.
+// -----------------------------------------------------------------------------
+
 void Drone::receiveMessages(const std::vector<Message>& msgs) {
     if (status == DroneStatus::DOWN) return;
 
     for (const auto& m : msgs) {
-        std::string type;
-        if (m.type == MessageType::HEARTBEAT) type = "HEARTBEAT";
-        else if (m.type == MessageType::RECONFIG_INIT) type = "INIT";
-        else if (m.type == MessageType::RECONFIG_ACK) type = "ACK";
-        else if (m.type == MessageType::RECONFIG_COMMIT) type = "COMMIT";
+        if (Log::enabled && Log::showMessages) {
+            std::string type;
+            if (m.type == MessageType::HEARTBEAT) type = "HEARTBEAT";
+            else if (m.type == MessageType::RECONFIG_INIT) type = "INIT";
+            else if (m.type == MessageType::RECONFIG_ACK) type = "ACK";
+            else if (m.type == MessageType::RECONFIG_COMMIT) type = "COMMIT";
 
-        std::cout << "[RECEIVE] Drone " << id << " received " << type
-            << " from " << m.senderId << " at simTime (approx)\n";
+            std::cout << "[RECEIVE] Drone " << id << " received " << type
+                << " from " << m.senderId << "\n";
+        }
         if (m.type == MessageType::HEARTBEAT) {
             membership.receiveHeartbeat(m.senderId, m.timestamp, m.pos);
         }
@@ -180,13 +163,13 @@ void Drone::receiveMessages(const std::vector<Message>& msgs) {
     }
 }
 
-//
-// ================================
-//          CONTROL + MOTION
-// ================================
-//
+// -----------------------------------------------------------------------------
+// Physics Integration
+// Simple Euler integration for drone movement.
+// -----------------------------------------------------------------------------
+
 void Drone::applyControl(double /*dt*/) {
-    // TODO: motion control later
+    // Reserved for future flight controller logic
 }
 
 void Drone::integrate(double dt) {

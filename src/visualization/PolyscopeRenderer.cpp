@@ -6,6 +6,7 @@
 #include "control/Controller.h"
 #include "visualization/PolyscopeRenderer.h"
 #include "core/RNG.h"
+#include "util/Logger.h"
 
 #include <cstdlib>
 #include <glm/glm.hpp>
@@ -100,6 +101,9 @@ PolyscopeRenderer::PolyscopeRenderer(Simulation* sim)
 void PolyscopeRenderer::initialize() {
     polyscope::init();
     polyscope::options::groundPlaneMode = polyscope::GroundPlaneMode::None;
+
+    // Default to drone show mode: black background for dramatic effect
+    polyscope::view::bgColor = { 0.0f, 0.0f, 0.0f, 1.0f };
 
     std::vector<glm::vec3> positions;
     for (auto& d : sim->getDrones()) {
@@ -197,32 +201,62 @@ void PolyscopeRenderer::renderLoop() {
 }
 
 // ============================================================================
-//   UI Panel
+//   UI Panel - Organized for clarity and ease of use
 // ============================================================================
 
 void PolyscopeRenderer::drawUI() {
 
-    // ------------------------------------------------------------------------
-    // Info panel (unchanged core info + consistency, heartbeat intervals)
-    // ------------------------------------------------------------------------
-    ImGui::Begin("Info");
-    ImGui::Text("Simulation Time: %.2f s", sim->getTime());
-    ImGui::Text("Num Drones: %d", (int)sim->getDrones().size());
-    ImGui::Text("Active Packets: %d", (int)activePackets.size());
-
-    // Membership consistency
-    auto [good, gid, memCount] = sim->checkConsistency();
-    ImVec4 col = good ? ImVec4(0, 1, 0, 1) : ImVec4(1, 0, 0, 1);
-    std::string label = good ? "CONSISTENT" : "INCONSISTENT";
-    ImGui::TextColored(col, "Membership Consistency: %s", label.c_str());
-    ImGui::Text("GroupId: %d  |  Members: %d", gid, memCount);
-
+    auto& config = sim->getConfig();
     double t = sim->getTime();
-    double hb = sim->getConfig().heartbeatInterval;
-    int intervals = (hb > 0 ? int(t / hb) : 0);
-    ImGui::Text("Heartbeat Intervals Elapsed: %d", intervals);
 
-    // Heartbeat miss indicator - find most recent miss across all drones
+    // ========================================================================
+    // MAIN CONTROL PANEL - One window to rule them all
+    // ========================================================================
+    ImGui::Begin("Drone Swarm Simulator");
+
+    // Quick mode switcher at the top
+    ImGui::SeparatorText("Quick Mode Switch");
+
+    if (ImGui::Button("Drone Show Mode", ImVec2(150, 0))) {
+        polyscope::view::bgColor = { 0.0f, 0.0f, 0.0f, 1.0f };
+        showNeighborLinks = false;
+        showHeartbeats = false;
+        showBroadcasts = false;
+        colorMode = PolyscopeRenderer::ColorMode::FORMATION;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Membership Mode", ImVec2(150, 0))) {
+        polyscope::view::bgColor = { 0.12f, 0.12f, 0.12f, 1.0f };
+        showNeighborLinks = true;
+        showHeartbeats = true;
+        showBroadcasts = true;
+        colorMode = PolyscopeRenderer::ColorMode::STATUS;
+    }
+
+    // ------------------------------------------------------------------------
+    // STATUS DISPLAY - Always visible
+    // ------------------------------------------------------------------------
+    ImGui::SeparatorText("Status");
+
+    ImGui::Text("Time: %.2f s", t);
+    ImGui::SameLine(150);
+    int upCount = 0;
+    for (auto& d : sim->getDrones()) {
+        if (d.getStatus() == DroneStatus::UP) upCount++;
+    }
+    ImGui::Text("Drones: %d/%d UP", upCount, (int)sim->getDrones().size());
+
+    // Membership consistency with prominent display
+    auto [good, gid, memCount] = sim->checkConsistency();
+    if (good) {
+        ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "CONSISTENT");
+    } else {
+        ImGui::TextColored(ImVec4(1.0f, 0.2f, 0.2f, 1.0f), "INCONSISTENT");
+    }
+    ImGui::SameLine();
+    ImGui::Text("Group: %d  Members: %d", gid, memCount);
+
+    // Heartbeat miss indicator - prominent warning when something happens
     double latestMissTime = -1.0;
     int latestMissDroneId = -1;
     int latestMissNeighborId = -1;
@@ -237,286 +271,286 @@ void PolyscopeRenderer::drawUI() {
         }
     }
 
-    ImGui::Separator();
     if (latestMissTime > 0.0 && (t - latestMissTime) < 5.0) {
-        // Recent miss - show in red with fade
         float fade = 1.0f - (float)(t - latestMissTime) / 5.0f;
-        ImGui::TextColored(ImVec4(1.0f, fade * 0.3f, fade * 0.3f, 1.0f),
-            "Last HB Miss: t=%.2f, Drone %d missed from %d",
-            latestMissTime, latestMissDroneId, latestMissNeighborId);
-    } else {
-        ImGui::TextDisabled("No recent heartbeat misses");
+        ImGui::TextColored(ImVec4(1.0f, 0.3f * fade, 0.3f * fade, 1.0f),
+            "HEARTBEAT MISS: Drone %d missed from %d (t=%.2f)",
+            latestMissDroneId, latestMissNeighborId, latestMissTime);
     }
-    ImGui::End();
 
     // ------------------------------------------------------------------------
-    // Controls panel (existing stuff + Kill Random Drone button)
+    // VISUALIZATION CONTROLS
     // ------------------------------------------------------------------------
-    ImGui::Begin("Controls");
+    if (ImGui::CollapsingHeader("Visualization", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox("Neighbor Links", &showNeighborLinks);
+        ImGui::SameLine();
+        ImGui::Checkbox("Heartbeats", &showHeartbeats);
+        ImGui::SameLine();
+        ImGui::Checkbox("Broadcasts", &showBroadcasts);
 
-    // Randomize positions on circle
-    if (ImGui::Button("Randomize Drone Positions")) {
-
-        std::vector<int> perm(sim->getDrones().size());
-        std::iota(perm.begin(), perm.end(), 0);
-        std::shuffle(perm.begin(), perm.end(), GLOBAL_RNG);
-
-        float radius = sim->getConfig().numDrones * sim->getConfig().droneSpacing
-            / (2.0f * 3.14159f);
-        float angleStep = 2.0f * 3.14159f / sim->getConfig().numDrones;
-
-        for (int i = 0; i < sim->getConfig().numDrones; ++i) {
-            float angle = i * angleStep;
-            glm::vec3 pos{
-                radius * std::cos(angle),
-                0.0f,
-                radius * std::sin(angle)
-            };
-            sim->getDrones()[perm[i]].setPosition(pos);
-        }
-
-        updateDronePositions();
-        updateNeighborLinks();
+        const char* colorModeNames[] = { "Status (UP/DOWN)", "Formation (Rainbow)" };
+        ImGui::Combo("Color Mode", (int*)&colorMode, colorModeNames, IM_ARRAYSIZE(colorModeNames));
     }
 
-    // Force recompute closest neighbors
-    if (ImGui::Button("Force Closest-Neighbor Reconfig")) {
-        for (auto& d : sim->getDrones()) {
-            if (d.getStatus() == DroneStatus::UP) {
-                d.getMembership().updateClosestNeighbors(d.getPosition());
+    // ------------------------------------------------------------------------
+    // FAILURE INJECTION - For testing the protocol
+    // ------------------------------------------------------------------------
+    if (ImGui::CollapsingHeader("Failure Injection", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::Button("Kill Random Drone")) {
+            std::vector<int> alive;
+            for (auto& d : sim->getDrones()) {
+                if (d.getStatus() == DroneStatus::UP) {
+                    alive.push_back(d.getId());
+                }
+            }
+            if (!alive.empty()) {
+                std::uniform_int_distribution<int> dist(0, (int)alive.size() - 1);
+                sim->killDrone(alive[dist(GLOBAL_RNG)]);
             }
         }
-        polyscope::removeCurveNetwork("neighbors");
-        buildNeighborCurveNetwork();
-    }
+        ImGui::SameLine();
+        if (ImGui::Button("Force Neighbor Reconfig")) {
+            for (auto& d : sim->getDrones()) {
+                if (d.getStatus() == DroneStatus::UP) {
+                    d.getMembership().updateClosestNeighbors(d.getPosition());
+                }
+            }
+            polyscope::removeCurveNetwork("neighbors");
+            buildNeighborCurveNetwork();
+        }
 
-    // NEW: Kill a random UP drone
-    if (ImGui::Button("Kill Random Drone")) {
-        std::vector<int> alive;
-        alive.reserve(sim->getDrones().size());
-        for (auto& d : sim->getDrones()) {
-            if (d.getStatus() == DroneStatus::UP) {
-                alive.push_back(d.getId());
+        // Scenario buttons
+        ImGui::Separator();
+        ImGui::Text("Scenarios:");
+
+        if (ImGui::Button("Cascade Failure")) {
+            // Kill a drone and its neighbors to demonstrate worst-case
+            auto& drones = sim->getDrones();
+            std::vector<int> alive;
+            for (auto& d : drones) {
+                if (d.getStatus() == DroneStatus::UP) alive.push_back(d.getId());
+            }
+            if (alive.size() >= 3) {
+                int victim = alive[0];
+                sim->killDrone(victim);
+                int left = drones[victim].getMembership().getLeftNeighbor();
+                int right = drones[victim].getMembership().getRightNeighbor();
+                if (left != -1 && drones[left].getStatus() == DroneStatus::UP)
+                    sim->killDrone(left);
+                if (right != -1 && right != left && drones[right].getStatus() == DroneStatus::UP)
+                    sim->killDrone(right);
             }
         }
-        if (!alive.empty()) {
-            std::uniform_int_distribution<int> dist(0, (int)alive.size() - 1);
-            int victimId = alive[dist(GLOBAL_RNG)];
-            sim->killDrone(victimId);
+        ImGui::SameLine();
+        if (ImGui::Button("Kill Half")) {
+            auto& drones = sim->getDrones();
+            int count = 0;
+            for (auto& d : drones) {
+                if (d.getStatus() == DroneStatus::UP && count % 2 == 0) {
+                    sim->killDrone(d.getId());
+                }
+                count++;
+            }
         }
     }
 
-    ImGui::Checkbox("Show Neighbor Links", &showNeighborLinks);
-    ImGui::Checkbox("Show Heartbeats", &showHeartbeats);
-    ImGui::Checkbox("Show Broadcasts", &showBroadcasts);
+    // ------------------------------------------------------------------------
+    // PROTOCOL PARAMETERS
+    // ------------------------------------------------------------------------
+    if (ImGui::CollapsingHeader("Protocol Parameters")) {
+        ImGui::Text("Timing");
+        float hbInterval = (float)config.heartbeatInterval;
+        if (ImGui::SliderFloat("Heartbeat Interval", &hbInterval, 0.1f, 5.0f, "%.2f s"))
+            config.heartbeatInterval = hbInterval;
 
-    // Simulation config (same as before)
-    auto& config = sim->getConfig();
-    if (ImGui::CollapsingHeader("Simulation Config")) {
+        float deltaSmall = (float)config.deltaSmall;
+        if (ImGui::SliderFloat("Timeout Delta (small)", &deltaSmall, 0.05f, 2.0f, "%.2f s"))
+            config.deltaSmall = deltaSmall;
 
-        ImGui::SeparatorText("Timing");
-        ImGui::InputDouble("Time Step", &config.timeStep);
-        ImGui::InputDouble("Heartbeat Interval", &config.heartbeatInterval);
-        ImGui::InputDouble("Datagram Timeout Delta", &config.deltaSmall);
-        ImGui::InputDouble("Broadcast Timeout Delta", &config.deltaLarge);
+        float deltaLarge = (float)config.deltaLarge;
+        if (ImGui::SliderFloat("Timeout Delta (large)", &deltaLarge, 0.1f, 3.0f, "%.2f s"))
+            config.deltaLarge = deltaLarge;
 
-        const char* colorModeNames[] = {
-            "Status (UP/DOWN)",
-            "Drone Show (Formation)"
-        };
-        ImGui::Combo("Drone Color Mode", (int*)&colorMode,
-            colorModeNames, IM_ARRAYSIZE(colorModeNames));
+        float reconfigInterval = (float)config.reconfigMinInterval;
+        if (ImGui::SliderFloat("Reconfig Min Interval", &reconfigInterval, 0.5f, 5.0f, "%.2f s"))
+            config.reconfigMinInterval = reconfigInterval;
+    }
 
-        ImGui::SeparatorText("Network Latency");
-        ImGui::InputDouble("Base Latency", &config.baseLatency);
-        ImGui::InputDouble("Alpha Latency (load growth)", &config.alphaLatency);
-        ImGui::InputDouble("Distance Latency Factor", &config.distanceLatencyFactor);
+    // ------------------------------------------------------------------------
+    // FAULT MODEL
+    // ------------------------------------------------------------------------
+    if (ImGui::CollapsingHeader("Fault Model")) {
+        ImGui::Checkbox("Enable Random Crashes", &config.enableCrashes);
+        if (config.enableCrashes) {
+            float crashRate = (float)config.crashRate;
+            if (ImGui::SliderFloat("Crash Rate", &crashRate, 0.0f, 0.1f, "%.4f"))
+                config.crashRate = crashRate;
 
-        ImGui::SeparatorText("Loss Model");
-        ImGui::Checkbox("Enable Burst Loss", &config.enableBursts);
-        ImGui::InputDouble("Burst Start Prob", &config.burstStartProb);
-        ImGui::InputDouble("Burst Drop Prob", &config.burstDropProb);
-        ImGui::InputDouble("Burst Duration", &config.burstDuration);
-        ImGui::InputDouble("Base Loss Prob", &config.baseLossProb);
-        ImGui::InputDouble("Beta Loss", &config.betaLoss);
-        ImGui::InputDouble("Duplication Prob", &config.duplicationProb);
-
-        ImGui::SeparatorText("Seeding");
-        ImGui::InputInt("Seed", (int*)&config.seed);
+            float permCrash = (float)config.pPermanentCrash;
+            if (ImGui::SliderFloat("Permanent Crash Prob", &permCrash, 0.0f, 1.0f, "%.2f"))
+                config.pPermanentCrash = permCrash;
+        }
 
         ImGui::Separator();
+        ImGui::Text("Message Omissions");
+        float omissionProb = (float)config.omissionProb;
+        if (ImGui::SliderFloat("Omission Probability", &omissionProb, 0.0f, 0.5f, "%.2f"))
+            config.omissionProb = omissionProb;
+
+        float sendJitter = (float)config.sendJitter;
+        if (ImGui::SliderFloat("Send Jitter", &sendJitter, 0.0f, 0.5f, "%.3f s"))
+            config.sendJitter = sendJitter;
+    }
+
+    // ------------------------------------------------------------------------
+    // NETWORK MODEL
+    // ------------------------------------------------------------------------
+    if (ImGui::CollapsingHeader("Network Model")) {
+        float baseLatency = (float)config.baseLatency;
+        if (ImGui::SliderFloat("Base Latency", &baseLatency, 0.0f, 0.5f, "%.3f s"))
+            config.baseLatency = baseLatency;
+
+        float alphaLatency = (float)config.alphaLatency;
+        if (ImGui::SliderFloat("Alpha (Load Growth)", &alphaLatency, 0.0f, 0.5f, "%.3f"))
+            config.alphaLatency = alphaLatency;
+
+        float distLatency = (float)config.distanceLatencyFactor;
+        if (ImGui::SliderFloat("Distance Factor", &distLatency, 0.0f, 0.1f, "%.4f"))
+            config.distanceLatencyFactor = distLatency;
+
+        ImGui::Separator();
+        ImGui::Text("Packet Loss");
+        float baseLoss = (float)config.baseLossProb;
+        if (ImGui::SliderFloat("Base Loss Prob", &baseLoss, 0.0f, 0.3f, "%.3f"))
+            config.baseLossProb = baseLoss;
+
+        ImGui::Checkbox("Enable Burst Loss", &config.enableBursts);
+        if (config.enableBursts) {
+            float burstStart = (float)config.burstStartProb;
+            if (ImGui::SliderFloat("Burst Start Prob", &burstStart, 0.0f, 0.1f, "%.4f"))
+                config.burstStartProb = burstStart;
+
+            float burstDrop = (float)config.burstDropProb;
+            if (ImGui::SliderFloat("Burst Drop Prob", &burstDrop, 0.0f, 1.0f, "%.2f"))
+                config.burstDropProb = burstDrop;
+
+            float burstDur = (float)config.burstDuration;
+            if (ImGui::SliderFloat("Burst Duration", &burstDur, 0.0f, 2.0f, "%.2f s"))
+                config.burstDuration = burstDur;
+        }
+
+        float dupProb = (float)config.duplicationProb;
+        if (ImGui::SliderFloat("Duplication Prob", &dupProb, 0.0f, 0.2f, "%.3f"))
+            config.duplicationProb = dupProb;
+    }
+
+    // ------------------------------------------------------------------------
+    // CONSOLE LOGGING
+    // ------------------------------------------------------------------------
+    if (ImGui::CollapsingHeader("Console Logging")) {
+        ImGui::Checkbox("Enable Logging", &Log::enabled);
+        if (Log::enabled) {
+            ImGui::Checkbox("Heartbeats", &Log::showHeartbeats);
+            ImGui::SameLine();
+            ImGui::Checkbox("Reconfig", &Log::showReconfig);
+            ImGui::Checkbox("Failures", &Log::showFailures);
+            ImGui::SameLine();
+            ImGui::Checkbox("Messages", &Log::showMessages);
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // SIMULATION CONTROL
+    // ------------------------------------------------------------------------
+    if (ImGui::CollapsingHeader("Simulation")) {
+        float timeStep = (float)config.timeStep;
+        if (ImGui::SliderFloat("Time Step", &timeStep, 0.005f, 0.1f, "%.3f s"))
+            config.timeStep = timeStep;
+
+        ImGui::InputInt("Seed", (int*)&config.seed);
+
         if (ImGui::Button("Restart Simulation")) {
             reseedRNG(config.seed);
             sim = new Simulation(config);
             rebuildAllVisuals();
-
-            // Reset drone show timeline as well
             gTimelineInitialized = false;
             gTimeline.clear();
             gNextCue = 0;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Randomize Positions")) {
+            std::vector<int> perm(sim->getDrones().size());
+            std::iota(perm.begin(), perm.end(), 0);
+            std::shuffle(perm.begin(), perm.end(), GLOBAL_RNG);
+
+            float radius = config.numDrones * config.droneSpacing / (2.0f * 3.14159f);
+            float angleStep = 2.0f * 3.14159f / config.numDrones;
+
+            for (int i = 0; i < config.numDrones; ++i) {
+                float angle = i * angleStep;
+                glm::vec3 pos{ radius * std::cos(angle), 0.0f, radius * std::sin(angle) };
+                sim->getDrones()[perm[i]].setPosition(pos);
+            }
+            updateDronePositions();
+            updateNeighborLinks();
         }
     }
 
     ImGui::End();
 
-    // ------------------------------------------------------------------------
-    // Drone Show panel: manual vs auto cueing, color effects tuning
-    // ------------------------------------------------------------------------
-    ImGui::Begin("Drone Show");
-
-    ImGui::SeparatorText("Visualization Modes");
-
-    // DRONE SHOW MODE
-    if (ImGui::Button("Drone Show Mode")) {
-
-        // Correct background color API
-        polyscope::view::bgColor = { 0.0f, 0.0f, 0.0f, 1.0f };
-        /*
-        // Correct camera API
-        polyscope::view::lookAt(
-            glm::vec3(0.0f, 0.0f, 10.0f),   // camera position
-            glm::vec3(0.0f, 0.0f, 0.0f),    // scene center
-            glm::vec3(0.0f, 1.0f, 0.0f)     // up direction
-        );
-        */
-        // Disable all group membership visual signals
-        showNeighborLinks = false;
-        showHeartbeats = false;
-        showBroadcasts = false;
-
-        // Use formation/drone-show colors
-        colorMode = PolyscopeRenderer::ColorMode::FORMATION;
-    }
-
-
-    // MEMBERSHIP MODE
-    if (ImGui::Button("Group Membership Mode")) {
-
-        // Reset background to default Polyscope gray
-        polyscope::view::bgColor = { 0.12f, 0.12f, 0.12f, 1.0f };
-        /*
-        // Restore your normal 3/4 view
-        polyscope::view::lookAt(
-            glm::vec3(5.0f, -8.0f, 4.0f),   // camera position
-            glm::vec3(0.0f, 0.0f, 0.0f),    // target
-            glm::vec3(0.0f, 0.0f, 1.0f)     // up direction
-        );
-        */
-        // Re-enable all membership visualization
-        showNeighborLinks = true;
-        showHeartbeats = true;
-        showBroadcasts = true;
-
-        // Use status-based coloring mode
-		colorMode = PolyscopeRenderer::ColorMode::STATUS;
-    }
-
-    ImGui::Separator();
-
-
-
+    // ========================================================================
+    // DRONE SHOW PANEL - Formation control (only when relevant)
+    // ========================================================================
     auto* ctrl = sim->getController();
     int patternCount = ctrl ? ctrl->getPatternCount() : 0;
 
-    if (!ctrl || patternCount == 0) {
-        ImGui::TextWrapped("No formation controller or patterns available.");
-        ImGui::End();
-        return;
-    }
+    if (ctrl && patternCount > 0) {
+        ImGui::Begin("Formation Control");
 
-    // Mode selection
-    int modeInt = (gShowMode == ShowMode::Manual ? 0 : 1);
-    ImGui::SeparatorText("Mode");
+        int modeInt = (gShowMode == ShowMode::Manual ? 0 : 1);
+        ImGui::RadioButton("Manual", &modeInt, 0);
+        ImGui::SameLine();
+        ImGui::RadioButton("Auto Timeline", &modeInt, 1);
+        gShowMode = (modeInt == 0 ? ShowMode::Manual : ShowMode::Auto);
 
-    ImGui::RadioButton("Manual Control", &modeInt, 0);
-    ImGui::SameLine();
-    ImGui::RadioButton("Auto Timeline", &modeInt, 1);
+        if (gShowMode == ShowMode::Manual) {
+            static double manualDuration = 2.0;
+            float dur = (float)manualDuration;
+            if (ImGui::SliderFloat("Morph Duration", &dur, 0.5f, 5.0f, "%.1f s"))
+                manualDuration = dur;
 
-    gShowMode = (modeInt == 0 ? ShowMode::Manual : ShowMode::Auto);
+            ImGui::Text("Active: Pattern %d", ctrl->getActivePattern());
 
-    // Shared parameters
-    ImGui::SeparatorText("Transition Settings");
-    ImGui::InputDouble("Default Transition Duration (s)", &gDefaultTransitionSec);
-    ImGui::InputDouble("Auto Show Total Length (s)", &gAutoShowLengthSec);// , 5.0, 120.0);
-
-    // If we tweak auto show length or duration while in Auto, rebuild timeline next frame
-    if (ImGui::Button("Rebuild Auto Timeline")) {
-        gTimelineInitialized = false;
-        gTimeline.clear();
-        gNextCue = 0;
-    }
-
-    // ------------------------------------------------------------------------
-    // Manual mode: user clicks formations & morphs
-    // ------------------------------------------------------------------------
-    if (gShowMode == ShowMode::Manual) {
-        ImGui::SeparatorText("Manual Formation Control");
-
-        static double manualDuration = 3.0;
-        ImGui::InputDouble("Manual Morph Duration (s)", &manualDuration);
-
-        int activePat = ctrl->getActivePattern();
-        ImGui::Text("Active Pattern: %d", activePat);
-
-        // List patterns with buttons
-        for (int i = 0; i < patternCount; ++i) {
-            ImGui::PushID(i);
-            ImGui::Text("Pattern %d", i);
-            ImGui::SameLine();
-            if (ImGui::Button("Set Instant")) {
-                ctrl->setActivePattern(i);
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Morph")) {
-                ctrl->startTransitionTo(i, sim->getTime(), manualDuration);
-            }
-            ImGui::PopID();
-        }
-    }
-
-    // ------------------------------------------------------------------------
-    // Auto mode: timeline overview (read-only status)
-    // ------------------------------------------------------------------------
-    if (gShowMode == ShowMode::Auto) {
-        ImGui::SeparatorText("Auto Timeline");
-
-        if (!gTimelineInitialized) {
-            ImGui::TextWrapped(
-                "Timeline not built yet; it will be created automatically "
-                "on the next frame using the available patterns.");
-        }
-        else {
-            double now = sim->getTime();
-            ImGui::Text("Time: %.2f s", now);
-            ImGui::Text("Cues: %d  |  Next Cue Index: %d",
-                (int)gTimeline.size(), gNextCue);
-
-            for (int i = 0; i < (int)gTimeline.size(); ++i) {
-                const Cue& c = gTimeline[i];
+            for (int i = 0; i < patternCount; ++i) {
                 ImGui::PushID(i);
-                if (i == gNextCue) {
-                    ImGui::TextColored(ImVec4(0, 1, 0, 1),
-                        ">> Cue %d: t=%.2f, pattern=%d, dur=%.2f",
-                        i, c.time, c.patternIndex, c.duration);
+                if (ImGui::Button(("Pattern " + std::to_string(i)).c_str(), ImVec2(80, 0))) {
+                    ctrl->startTransitionTo(i, sim->getTime(), manualDuration);
                 }
-                else {
-                    ImGui::Text("Cue %d: t=%.2f, pattern=%d, dur=%.2f",
-                        i, c.time, c.patternIndex, c.duration);
-                }
+                if (i < patternCount - 1) ImGui::SameLine();
                 ImGui::PopID();
             }
+        } else {
+            if (!gTimelineInitialized) {
+                ImGui::TextWrapped("Timeline builds on next frame...");
+            } else {
+                ImGui::Text("Cue %d/%d", gNextCue, (int)gTimeline.size());
+                if (gNextCue < (int)gTimeline.size()) {
+                    const Cue& c = gTimeline[gNextCue];
+                    ImGui::SameLine();
+                    ImGui::Text("-> Pattern %d at t=%.1f", c.patternIndex, c.time);
+                }
+            }
+
+            if (ImGui::Button("Restart Show")) {
+                gTimelineInitialized = false;
+                gTimeline.clear();
+                gNextCue = 0;
+                ctrl->setActivePattern(0);
+            }
         }
 
-        if (ImGui::Button("Restart Auto Show")) {
-            gTimelineInitialized = false;
-            gTimeline.clear();
-            gNextCue = 0;
-            // Also reset active pattern to 0 immediately, for determinism
-            ctrl->setActivePattern(0);
-        }
+        ImGui::End();
     }
-
-    ImGui::End();
 }
 
 // ============================================================================

@@ -32,10 +32,10 @@ private:
     polyscope::PointCloud* cloud = nullptr;
     polyscope::CurveNetwork* neighborNet = nullptr;
 
-    // UI toggles
-    bool showNeighborLinks = true;
-    bool showHeartbeats = true;
-    bool showBroadcasts = true;
+    // UI toggles - default to drone show mode (hide membership visuals)
+    bool showNeighborLinks = false;
+    bool showHeartbeats = false;
+    bool showBroadcasts = false;
 
     struct ActivePacket {
         glm::vec3 src;
@@ -61,7 +61,8 @@ private:
     enum class ColorMode {
         STATUS = 0,
         FORMATION = 1
-	};
+    };
 
-    ColorMode colorMode = ColorMode::STATUS; 
+    // Default to FORMATION (Drone Show) mode for a more impressive first launch
+    ColorMode colorMode = ColorMode::FORMATION; 
 };

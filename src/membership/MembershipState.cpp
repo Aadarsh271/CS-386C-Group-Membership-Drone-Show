@@ -1,15 +1,32 @@
+// =============================================================================
+// MembershipState.cpp - Neighborhood Surveillance Group Membership Protocol
+//
+// This implements a distributed failure detection and group reconfiguration
+// protocol based on local heartbeat monitoring. Each drone monitors only its
+// two closest neighbors (left and right), enabling O(1) failure detection
+// overhead per node.
+//
+// The reconfiguration uses a 3-phase atomic broadcast protocol:
+//   1. INIT  - Initiator proposes new configuration
+//   2. ACK   - Participants acknowledge and share their positions
+//   3. COMMIT - Initiator finalizes membership after collecting ACKs
+//
+// This design is inspired by classic group communication research, adapted
+// for the unique constraints of drone swarms where physical proximity matters.
+// =============================================================================
 
 #include "membership/MembershipState.h"
 #include "core/Drone.h"
+#include "util/Logger.h"
 #include <algorithm>
 #include <cstdio>
 #include <unordered_set>
-#include <iostream>
 #include <cstdint>
 
-// =============================
-//   ENCODING/DECODING HELPERS
-// =============================
+// -----------------------------------------------------------------------------
+// Binary Encoding Helpers
+// Big-endian encoding for network-portable message payloads.
+// -----------------------------------------------------------------------------
 
 static inline void encodeUint16(std::vector<uint8_t>& out, uint16_t v) {
     out.push_back(uint8_t((v >> 8) & 0xFF));
@@ -62,9 +79,9 @@ static inline glm::vec3 decodeVec3(const std::vector<uint8_t>& in, size_t pos) {
     );
 }
 
-// =============================
-//      CONSTRUCTOR
-// =============================
+// -----------------------------------------------------------------------------
+// Initialization
+// -----------------------------------------------------------------------------
 
 MembershipState::MembershipState(int selfId, double hbInt, double timeout)
     : selfId(selfId),
@@ -96,9 +113,11 @@ void MembershipState::setDroneList(std::vector<Drone>* ptr) {
     }
 }
 
-// =============================
-//            TICK
-// =============================
+// -----------------------------------------------------------------------------
+// Tick - Main update loop, called every simulation step
+// Handles heartbeat scheduling, timeout detection, and reconfig initiation.
+// -----------------------------------------------------------------------------
+
 void MembershipState::tick(double logicalTime, const glm::vec3& selfPos)
 {
     double r = allDrones->at(selfId).config.reconfigMinInterval;
@@ -119,8 +138,8 @@ void MembershipState::tick(double logicalTime, const glm::vec3& selfPos)
         // the initiator probably died. Abort so we can retry.
         double reconfigTimeout = 4.0 * allDrones->at(selfId).config.deltaLarge;
         if (logicalTime > initReceivedTime + reconfigTimeout && !commitSent) {
-            std::cout << "[TIMEOUT] Drone " << selfId << " reconfig timed out at t=" << logicalTime
-                      << " (started at " << initReceivedTime << ")\n";
+            Log::reconfig("[TIMEOUT] Drone ", selfId, " reconfig timed out at t=", logicalTime,
+                          " (started at ", initReceivedTime, ")\n");
             inReconfig = false;
             commitSent = false;
             ackSent = false;
@@ -146,8 +165,8 @@ void MembershipState::tick(double logicalTime, const glm::vec3& selfPos)
         // Update neighbors to exclude dead ones before initiating
         updateClosestNeighbors(selfPos);
 
-        std::cout << "[TICK] Drone " << selfId << " INITIATING RECONFIG due to failed neighbor at t="
-                  << logicalTime << " (left=" << leftNeighbor << ", right=" << rightNeighbor << ")\n";
+        Log::reconfig("[TICK] Drone ", selfId, " INITIATING RECONFIG due to failed neighbor at t=",
+                      logicalTime, " (left=", leftNeighbor, ", right=", rightNeighbor, ")\n");
         auto rc = buildReconfigBroadcast(logicalTime, selfPos);
         pendingReconfigs.insert(pendingReconfigs.end(), rc.begin(), rc.end());
         lastInitTime = logicalTime;
@@ -155,16 +174,18 @@ void MembershipState::tick(double logicalTime, const glm::vec3& selfPos)
     // Case B: We're not in a group (recovered from crash, or never joined)
     // Per protocol: "If a drone is not a member of a group, every r seconds it initiates a new group"
     else if (!isInGroup() && rateLimitOk && !inReconfig) {
-        std::cout << "[TICK] Drone " << selfId << " INITIATING RECONFIG (no group) at t=" << logicalTime << "\n";
+        Log::reconfig("[TICK] Drone ", selfId, " INITIATING RECONFIG (no group) at t=", logicalTime, "\n");
         auto msgs = buildReconfigBroadcast(logicalTime, selfPos);
         pendingReconfigs.insert(pendingReconfigs.end(), msgs.begin(), msgs.end());
         lastInitTime = logicalTime;
     }
 }
 
-// =============================
-//    HEARTBEAT RECEIVE
-// =============================
+// -----------------------------------------------------------------------------
+// Heartbeat Processing
+// When we receive a heartbeat, the sender is definitely alive. Update our view.
+// -----------------------------------------------------------------------------
+
 void MembershipState::receiveHeartbeat(int fromId, double time, const glm::vec3& pos)
 {
     auto& info = view[fromId];
@@ -173,11 +194,15 @@ void MembershipState::receiveHeartbeat(int fromId, double time, const glm::vec3&
     info.lastKnownPosition = pos;
 }
 
-// =============================
-//    FAILURE DETECTION
-// =============================
-// Returns true if any neighbor is currently DOWN (not just newly detected).
-// This allows retry logic to keep initiating reconfigs until the issue is resolved.
+// -----------------------------------------------------------------------------
+// Failure Detection
+// The heart of the neighborhood surveillance protocol. We only monitor our
+// two closest neighbors - if we haven't heard from them within the timeout
+// window, they're considered failed.
+//
+// Returns true if any neighbor is DOWN (triggers reconfiguration).
+// -----------------------------------------------------------------------------
+
 bool MembershipState::detectFailures(double time)
 {
     bool anyNeighborDown = false;
@@ -200,9 +225,9 @@ bool MembershipState::detectFailures(double time)
 
         if (info.status == DroneStatus::UP && timeSinceLastHB > deadline) {
             // Newly detected failure - mark as DOWN
-            std::cout << "[FAILURE] Drone " << selfId << " detected NEW failure of neighbor " << n
-                      << " at t=" << time << " (lastHB=" << info.lastHeartbeatTime
-                      << ", timeSince=" << timeSinceLastHB << ", deadline=" << deadline << ")\n";
+            Log::failure("[FAILURE] Drone ", selfId, " detected NEW failure of neighbor ", n,
+                         " at t=", time, " (lastHB=", info.lastHeartbeatTime,
+                         ", timeSince=", timeSinceLastHB, ", deadline=", deadline, ")\n");
             info.status = DroneStatus::DOWN;
             anyNeighborDown = true;
 
@@ -219,9 +244,11 @@ bool MembershipState::detectFailures(double time)
     return anyNeighborDown;
 }
 
-// =============================
-//    HEARTBEAT GENERATION
-// =============================
+// -----------------------------------------------------------------------------
+// Heartbeat Generation
+// Send heartbeats to our two neighbors. Simple and elegant.
+// -----------------------------------------------------------------------------
+
 std::vector<Message> MembershipState::generateHeartbeatMessages(double sendTime, const glm::vec3& selfPos)
 {
     std::vector<Message> msgs;
@@ -251,16 +278,17 @@ std::vector<Message> MembershipState::generateHeartbeatMessages(double sendTime,
     return msgs;
 }
 
-// =============================
-//   PHASE 1: INIT BROADCAST
-// =============================
-// INIT now contains only: reconfigId, initiatorId
-// Members are discovered via ACKs, not proposed upfront
+// -----------------------------------------------------------------------------
+// PHASE 1: INIT Broadcast
+// When we detect a failure (or aren't in a group), we initiate reconfiguration.
+// The INIT message is broadcast to all - members will respond with ACKs.
+// -----------------------------------------------------------------------------
+
 std::vector<Message> MembershipState::buildReconfigBroadcast(double currentTime, const glm::vec3& selfPos)
 {
     std::vector<Message> out;
 
-    std::cout << "[INIT] Drone " << selfId << " building INIT at t=" << currentTime << "\n";
+    Log::reconfig("[INIT] Drone ", selfId, " building INIT at t=", currentTime, "\n");
 
     // Generate reconfigId from timestamp
     uint32_t reconfigId = static_cast<uint32_t>(currentTime * 1000.0);
@@ -296,14 +324,16 @@ std::vector<Message> MembershipState::buildReconfigBroadcast(double currentTime,
     // Initiator also sends its own ACK immediately
     sendAck(currentTime, selfPos);
 
-    std::cout << "[INIT] Drone " << selfId << " sent INIT with reconfigId=" << reconfigId << "\n";
+    Log::reconfig("[INIT] Drone ", selfId, " sent INIT with reconfigId=", reconfigId, "\n");
 
     return out;
 }
 
-// =============================
-//   HELPER: Send ACK
-// =============================
+// -----------------------------------------------------------------------------
+// PHASE 2: ACK Sending
+// Respond to INIT with our current position. Everyone who ACKs becomes a member.
+// -----------------------------------------------------------------------------
+
 void MembershipState::sendAck(double time, const glm::vec3& selfPos)
 {
     if (ackSent) return;
@@ -325,13 +355,14 @@ void MembershipState::sendAck(double time, const glm::vec3& selfPos)
     pendingReconfigs.push_back(ack);
     ackSent = true;
 
-    std::cout << "[ACK] Drone " << selfId << " sent ACK for reconfigId=" << pendingReconfigId
-              << " pos=(" << selfPos.x << "," << selfPos.y << "," << selfPos.z << ")\n";
+    Log::reconfig("[ACK] Drone ", selfId, " sent ACK for reconfigId=", pendingReconfigId,
+                  " pos=(", selfPos.x, ",", selfPos.y, ",", selfPos.z, ")\n");
 }
 
-// =============================
-//      INSTALL RECONFIG (legacy)
-// =============================
+// -----------------------------------------------------------------------------
+// Legacy: Direct reconfig installation (kept for backwards compatibility)
+// -----------------------------------------------------------------------------
+
 void MembershipState::installReconfig(const std::vector<uint8_t>& payload, double time, const glm::vec3& selfPos)
 {
     view.clear();
@@ -353,9 +384,10 @@ void MembershipState::installReconfig(const std::vector<uint8_t>& payload, doubl
     updateClosestNeighbors(selfPos);
 }
 
-// =============================
-//    GETTERS / CONSUMERS
-// =============================
+// -----------------------------------------------------------------------------
+// Message Queue Management
+// -----------------------------------------------------------------------------
+
 std::vector<Message> MembershipState::consumePendingReconfigs() {
     auto out = pendingReconfigs;
     pendingReconfigs.clear();
@@ -390,12 +422,13 @@ void MembershipState::setNeighbors(int leftId, int rightId) {
     rightNeighbor = rightId;
 }
 
-// =============================
-//   CLOSEST NEIGHBORS
-// =============================
-// Per protocol: neighbors are determined ONLY from the membership view
-// (members who sent ACKs during reconfig). We use positions from the view,
-// NOT the physical drone positions from allDrones.
+// -----------------------------------------------------------------------------
+// Neighbor Selection
+// The key insight: neighbors are chosen based on physical proximity in the
+// membership view, not the actual drone positions. This ensures consistency
+// across all group members.
+// -----------------------------------------------------------------------------
+
 void MembershipState::updateClosestNeighbors(const glm::vec3& selfPos)
 {
     std::vector<std::pair<float, int>> dist;
@@ -428,10 +461,12 @@ void MembershipState::updateClosestNeighbors(const glm::vec3& selfPos)
     }
 }
 
-// =============================
-//   PHASE 1: PROCESS INIT
-// =============================
-// Upon receiving INIT, node enters reconfig and sends ACK
+// -----------------------------------------------------------------------------
+// Message Handlers: INIT
+// When we receive an INIT, we join the reconfiguration and send our ACK.
+// Tie-breaking handles concurrent INIT collisions deterministically.
+// -----------------------------------------------------------------------------
+
 void MembershipState::processInit(const Message& m, double time, const glm::vec3& selfPos)
 {
     const auto& p = m.payload;
@@ -443,23 +478,23 @@ void MembershipState::processInit(const Message& m, double time, const glm::vec3
     uint16_t initId = decodeUint16(p, idx);
     idx += 2;
 
-    std::cout << "[INIT RECV] Drone " << selfId << " received INIT from " << initId
-              << " recId=" << recId << "\n";
+    Log::reconfig("[INIT RECV] Drone ", selfId, " received INIT from ", initId,
+                  " recId=", recId, "\n");
 
     // Tie-breaking for concurrent INITs:
     // - Higher reconfigId wins
     // - If equal, LOWER initiatorId wins (first come, first served based on id ordering)
     if (inReconfig) {
         if (recId < pendingReconfigId) {
-            std::cout << "[INIT RECV] Drone " << selfId << " rejecting: lower recId\n";
+            Log::reconfig("[INIT RECV] Drone ", selfId, " rejecting: lower recId\n");
             return;
         }
         if (recId == pendingReconfigId && initId >= initiatorId) {
-            std::cout << "[INIT RECV] Drone " << selfId << " rejecting: same recId, higher/equal initId\n";
+            Log::reconfig("[INIT RECV] Drone ", selfId, " rejecting: same recId, higher/equal initId\n");
             return;
         }
         // This INIT is better - switch to it
-        std::cout << "[INIT RECV] Drone " << selfId << " switching to better INIT\n";
+        Log::reconfig("[INIT RECV] Drone ", selfId, " switching to better INIT\n");
     }
 
     // Accept this INIT
@@ -479,10 +514,11 @@ void MembershipState::processInit(const Message& m, double time, const glm::vec3
     sendAck(time, selfPos);
 }
 
-// =============================
-//   PHASE 2: PROCESS ACK
-// =============================
-// All nodes collect ACKs to learn about participants and their positions
+// -----------------------------------------------------------------------------
+// Message Handlers: ACK
+// Collect positions from everyone who's joining this reconfiguration.
+// -----------------------------------------------------------------------------
+
 void MembershipState::processAck(const Message& m, double time)
 {
     if (!inReconfig) return;
@@ -499,8 +535,8 @@ void MembershipState::processAck(const Message& m, double time)
 
     if (recId != pendingReconfigId) return;
 
-    std::cout << "[ACK RECV] Drone " << selfId << " received ACK from " << sender
-              << " pos=(" << pos.x << "," << pos.y << "," << pos.z << ")\n";
+    Log::reconfig("[ACK RECV] Drone ", selfId, " received ACK from ", sender,
+                  " pos=(", pos.x, ",", pos.y, ",", pos.z, ")\n");
 
     // Store position from ACK - all nodes track this for neighbor determination
     ackPositions[int(sender)] = pos;
@@ -524,10 +560,12 @@ void MembershipState::processAck(const Message& m, double time)
     acksReceived.insert(int(sender));
 }
 
-// =============================
-//   PHASE 3: SEND COMMIT
-// =============================
-// Initiator waits for ACKs, then broadcasts COMMIT with final member list
+// -----------------------------------------------------------------------------
+// PHASE 3: COMMIT
+// The initiator waits for the ACK collection window, then broadcasts the final
+// membership to everyone. This is the moment of truth!
+// -----------------------------------------------------------------------------
+
 void MembershipState::maybeSendCommit(double time)
 {
     if (!inReconfig) return;
@@ -536,15 +574,17 @@ void MembershipState::maybeSendCommit(double time)
 
     if (time < commitDueTime) return;
 
-    std::cout << "[COMMIT] Drone " << selfId << " sending COMMIT at t=" << time
-              << ", acksReceived=" << acksReceived.size() << "\n";
+    Log::reconfig("[COMMIT] Drone ", selfId, " sending COMMIT at t=", time,
+                  ", acksReceived=", acksReceived.size(), "\n");
 
     // Determine final membership from ACKs received
     auto finalMembers = pruneMembers(acksReceived, ackPositions);
 
-    std::cout << "[COMMIT] Final members: ";
-    for (int id : finalMembers) std::cout << id << " ";
-    std::cout << "\n";
+    if (Log::enabled && Log::showReconfig) {
+        std::cout << "[COMMIT] Final members: ";
+        for (int id : finalMembers) std::cout << id << " ";
+        std::cout << "\n";
+    }
 
     // Build COMMIT payload: [reconfigId(4)][initiatorId(2)][numMembers(2)]
     //                       [member1_id(2)][member1_pos(12)]...
@@ -577,10 +617,12 @@ void MembershipState::maybeSendCommit(double time)
     // This is done when we receive the broadcast back (through processCommit)
 }
 
-// =============================
-//   PHASE 3: PROCESS COMMIT
-// =============================
-// All nodes install final membership and update neighbors using received positions
+// -----------------------------------------------------------------------------
+// Message Handlers: COMMIT
+// Install the final membership and update our neighbor relationships.
+// After this, we're back to normal operation with the new group.
+// -----------------------------------------------------------------------------
+
 void MembershipState::processCommit(const Message& m, double time, const glm::vec3& selfPos)
 {
     const auto& p = m.payload;
@@ -594,15 +636,15 @@ void MembershipState::processCommit(const Message& m, double time, const glm::ve
     uint16_t numMembers = decodeUint16(p, idx);
     idx += 2;
 
-    std::cout << "[COMMIT RECV] Drone " << selfId << " received COMMIT recId=" << recId
-              << " from initiator=" << initId << " numMembers=" << numMembers << "\n";
+    Log::reconfig("[COMMIT RECV] Drone ", selfId, " received COMMIT recId=", recId,
+                  " from initiator=", initId, " numMembers=", numMembers, "\n");
 
     // Protocol: Only accept COMMIT if we participated in this reconfig (sent ACK)
     // Nodes that didn't participate must form their own group via INIT
     if (!inReconfig || recId != pendingReconfigId) {
-        std::cout << "[COMMIT RECV] Drone " << selfId << " rejecting: not in matching reconfig"
-                  << " (inReconfig=" << inReconfig << ", pendingReconfigId=" << pendingReconfigId
-                  << ", recId=" << recId << ")\n";
+        Log::reconfig("[COMMIT RECV] Drone ", selfId, " rejecting: not in matching reconfig",
+                      " (inReconfig=", inReconfig, ", pendingReconfigId=", pendingReconfigId,
+                      ", recId=", recId, ")\n");
         return;
     }
 
@@ -623,8 +665,8 @@ void MembershipState::processCommit(const Message& m, double time, const glm::ve
         mi.lastKnownPosition = memberPos;
         view[int(memberId)] = mi;
 
-        std::cout << "[COMMIT RECV] Drone " << selfId << " added member " << memberId
-                  << " pos=(" << memberPos.x << "," << memberPos.y << "," << memberPos.z << ")\n";
+        Log::reconfig("[COMMIT RECV] Drone ", selfId, " added member ", memberId,
+                      " pos=(", memberPos.x, ",", memberPos.y, ",", memberPos.z, ")\n");
     }
 
     // Make sure we're in the view with our current position
@@ -633,8 +675,8 @@ void MembershipState::processCommit(const Message& m, double time, const glm::ve
     // Update neighbors using final membership positions
     updateClosestNeighbors(selfPos);
 
-    std::cout << "[COMMIT RECV] Drone " << selfId << " final neighbors: left=" << leftNeighbor
-              << " right=" << rightNeighbor << "\n";
+    Log::reconfig("[COMMIT RECV] Drone ", selfId, " final neighbors: left=", leftNeighbor,
+                  " right=", rightNeighbor, "\n");
 
     // Clear reconfig state
     inReconfig = false;
@@ -647,7 +689,7 @@ void MembershipState::processCommit(const Message& m, double time, const glm::ve
 
     lastCommitTime = time;
 
-    std::cout << "[COMMIT RECV] Drone " << selfId << " completed reconfig, groupId=" << groupId << "\n";
+    Log::reconfig("[COMMIT RECV] Drone ", selfId, " completed reconfig, groupId=", groupId, "\n");
 }
 
 // Legacy function - not used in new protocol
